@@ -1,6 +1,6 @@
 # Drew
 
-*Auto-updated by nightly consolidation.*
+*Auto-updated by nightly consolidation. Last updated: 2026-02-13T03:00:00Z*
 
 ## Contact
 
@@ -18,17 +18,27 @@ Owner / operator of Lobster. Founder of Sidereal Press / Arcastro.
 - Values reliability and local-first architecture
 - Wants no external API dependencies for core functionality
 - Favors functional programming patterns
+- Thinks in terms of layered architecture (sync epic was 5 layers, energy flow was 7 layers)
+- Likes physically faithful visualizations (energy flow Sankey: real electron paths, not abstractions)
 
 ## Projects
 
-- Lobster (AI assistant)
-- Arcastro
-- Sidereal Press
+- **Lobster** (AI assistant) -- primary focus
+- **Transformers** (energy visualization) -- energy flow epic completed
+- **bisque-cli** (domain registrar) -- new exploration, AI-native concept
+- **Arcastro** -- company
+- **Sidereal Press** -- publishing
+
+## Recent Activity
+
+- Feb 12-13: Completed two major epics (Lobster sync #30, Transformers energy flow #10)
+- Started bisque-cli brain dump (#1) exploring AI-native domain registrar
+- Highly productive sprint: ~6,437 lines and 153 tests merged in the sync epic alone
 
 ## Pending Items
 
-*No pending items with Drew specifically.*
+- Follow up with Edmunds about AI lecture at Arcastro (overdue since Feb 3)
 
 ## Last Contact
 
-*Updated by consolidation.*
+2026-02-13 (active throughout the sync epic completion)
