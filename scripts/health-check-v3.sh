@@ -29,6 +29,7 @@ SERVICE_CLAUDE="lobster-claude"
 SERVICE_ROUTER="lobster-router"
 
 INBOX_DIR="$HOME/messages/inbox"
+LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$HOME/messages/config/lobster-state.json}"
 STALE_THRESHOLD_SECONDS=300          # 5 minutes - RED if any message older
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
@@ -152,6 +153,33 @@ record_restart() {
 
     restart_count=$((restart_count + 1))
     echo "$now $restart_count" > "$RESTART_STATE_FILE"
+}
+
+#===============================================================================
+# Hibernation State Check
+#===============================================================================
+
+# Read the current Lobster mode from state file.
+# Returns 0 (exit code) if mode is "hibernate", 1 if "active" or unknown.
+read_lobster_mode() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        echo "active"
+        return
+    fi
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('mode', 'active'))
+except Exception:
+    print('active')
+" 2>/dev/null || echo "active"
+}
+
+is_hibernating() {
+    local mode
+    mode=$(read_lobster_mode)
+    [[ "$mode" == "hibernate" ]]
 }
 
 #===============================================================================
@@ -341,6 +369,24 @@ main() {
 
     local level="GREEN"
     local restart_reason=""
+
+    # --- Hibernation guard: if Claude intentionally exited, do not restart ---
+    if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-}" != "1" ]] && is_hibernating; then
+        log_info "HIBERNATE: Lobster is in hibernate mode - skipping Claude restart"
+        log_info "=== Health check v3 complete (level=HIBERNATE) ==="
+        exit 0
+    fi
+
+    if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-}" == "1" ]]; then
+        local mode
+        mode=$(read_lobster_mode)
+        log_info "DRY_RUN: lobster mode='$mode'"
+        if [[ "$mode" == "hibernate" ]]; then
+            log_info "DRY_RUN HIBERNATE: would skip restart in hibernate mode"
+            log_info "=== Health check v3 complete (level=HIBERNATE, dry_run=1) ==="
+            exit 0
+        fi
+    fi
 
     # --- Infrastructure checks (RED if any fail) ---
 

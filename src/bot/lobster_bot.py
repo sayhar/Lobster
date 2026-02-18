@@ -16,13 +16,14 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import shutil
+import subprocess
+import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-
-import tempfile
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -47,12 +48,19 @@ AUDIO_DIR = Path.home() / "messages" / "audio"
 IMAGES_DIR = Path.home() / "messages" / "images"
 DEAD_LETTER_DIR = Path.home() / "messages" / "dead-letter"
 
+# Hibernation state file - written by Claude when it hibernates
+LOBSTER_STATE_FILE = Path.home() / "messages" / "config" / "lobster-state.json"
+
+# Script used to start a fresh Claude session (same as lobster-claude.service)
+CLAUDE_WAKE_SCRIPT = Path.home() / "lobster" / "scripts" / "start-lobster.sh"
+
 # Ensure directories exist
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 DEAD_LETTER_DIR.mkdir(parents=True, exist_ok=True)
+LOBSTER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 # Logging
 LOG_DIR = Path.home() / "lobster-workspace" / "logs"
@@ -75,6 +83,91 @@ main_loop = None
 
 # Tracks files currently being processed to prevent duplicate sends
 _processing_files: set[str] = set()
+
+# Lock to prevent concurrent wake attempts (race condition: two simultaneous
+# incoming messages while hibernating should only trigger one Claude spawn)
+_wake_lock = threading.Lock()
+
+
+def _read_lobster_state() -> str:
+    """Read current Lobster mode from state file.
+
+    Returns 'active' or 'hibernate'. Defaults to 'active' on any error
+    (missing file, corrupt JSON, unknown mode).
+    """
+    try:
+        if not LOBSTER_STATE_FILE.exists():
+            return "active"
+        data = json.loads(LOBSTER_STATE_FILE.read_text())
+        mode = data.get("mode", "active")
+        return mode if mode in ("active", "hibernate") else "active"
+    except Exception:
+        return "active"
+
+
+def _is_claude_running() -> bool:
+    """Return True if a Claude process with --dangerously-skip-permissions is running."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude.*--dangerously-skip-permissions"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def wake_claude_if_hibernating() -> None:
+    """If Lobster is hibernating and Claude is not running, spawn a fresh session.
+
+    Uses a threading lock so that concurrent calls (e.g. two messages arriving
+    at the same time while hibernating) only trigger a single spawn.
+    """
+    # Fast path: if not hibernating or Claude is already up, nothing to do
+    if _read_lobster_state() != "hibernate":
+        return
+    if _is_claude_running():
+        log.info("wake_claude: Claude already running despite hibernate state")
+        return
+
+    # Try to acquire the wake lock without blocking
+    if not _wake_lock.acquire(blocking=False):
+        log.info("wake_claude: another wake attempt is in progress, skipping")
+        return
+
+    try:
+        # Re-check inside the lock to handle the TOCTOU window
+        if _read_lobster_state() != "hibernate":
+            return
+        if _is_claude_running():
+            log.info("wake_claude: Claude started before we could acquire lock")
+            return
+
+        log.info("wake_claude: Lobster is hibernating and Claude is not running — waking")
+
+        # Preferred: restart via systemd (keeps service state consistent)
+        try:
+            subprocess.Popen(
+                ["sudo", "systemctl", "restart", "lobster-claude"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            log.info("wake_claude: issued 'systemctl restart lobster-claude'")
+        except Exception as e:
+            log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
+            # Fallback: call start-lobster.sh directly
+            if CLAUDE_WAKE_SCRIPT.exists():
+                subprocess.Popen(
+                    ["bash", str(CLAUDE_WAKE_SCRIPT)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                log.info(f"wake_claude: spawned {CLAUDE_WAKE_SCRIPT}")
+            else:
+                log.error(f"wake_claude: fallback script not found: {CLAUDE_WAKE_SCRIPT}")
+    finally:
+        _wake_lock.release()
 
 
 def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
@@ -261,6 +354,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Unauthorized", show_alert=True)
         return
 
+    # Wake Claude if it hibernated
+    wake_claude_if_hibernating()
+
     # Acknowledge the button press
     await query.answer()
 
@@ -336,6 +432,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user.id):
         log.warning(f"Unauthorized: {user.id}")
         return
+
+    # Wake Claude if it hibernated — do this before writing to inbox so Claude
+    # is starting up while the message file is being written
+    wake_claude_if_hibernating()
 
     # First-message detection: send onboarding to new users
     if not is_user_onboarded(user.id):

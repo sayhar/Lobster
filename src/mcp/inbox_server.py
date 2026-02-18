@@ -87,6 +87,9 @@ TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = Path.home() / "lobster-workspace" / "logs" / "claude-heartbeat"
 
+# Hibernation state file - tracks whether Lobster is active or hibernating
+LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
+
 # Scheduled Tasks Directories
 SCHEDULED_TASKS_DIR = Path.home() / "lobster" / "scheduled-tasks"
 SCHEDULED_JOBS_FILE = SCHEDULED_TASKS_DIR / "jobs.json"
@@ -168,6 +171,48 @@ def touch_heartbeat():
         pass  # Don't fail on heartbeat errors
 
 
+def _read_lobster_state(state_file: Path = None) -> str:
+    """Read the current Lobster state from state file.
+
+    Returns 'active' or 'hibernate'. Defaults to 'active' if the file is
+    missing, corrupt, or contains an unrecognised mode value.
+    """
+    if state_file is None:
+        state_file = LOBSTER_STATE_FILE
+    try:
+        if not state_file.exists():
+            return "active"
+        data = json.loads(state_file.read_text())
+        mode = data.get("mode", "active")
+        return mode if mode in ("active", "hibernate") else "active"
+    except Exception:
+        return "active"
+
+
+def _write_lobster_state(state_file: Path = None, mode: str = "active") -> None:
+    """Atomically write Lobster state to state file.
+
+    Uses write-to-temp-then-rename so readers never see a partial file.
+    """
+    if state_file is None:
+        state_file = LOBSTER_STATE_FILE
+    data = {
+        "mode": mode,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    content = json.dumps(data, indent=2)
+    tmp = state_file.parent / f".lobster-state-{os.getpid()}.tmp"
+    try:
+        tmp.write_text(content)
+        tmp.rename(state_file)
+    except Exception as e:
+        log.error(f"Failed to write lobster state: {e}")
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
@@ -182,6 +227,11 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Maximum seconds to wait. Default 300 (5 minutes). After timeout, returns with a prompt to call again.",
                         "default": 300,
+                    },
+                    "hibernate_on_timeout": {
+                        "type": "boolean",
+                        "description": "If true, write hibernate state and signal graceful exit when timeout expires with no messages. Default false.",
+                        "default": False,
                     },
                 },
             },
@@ -1147,6 +1197,7 @@ def _recover_retryable_messages():
 async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
     timeout = args.get("timeout", 300)
+    hibernate_on_timeout = args.get("hibernate_on_timeout", False)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
@@ -1163,7 +1214,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         return await handle_check_inbox({"limit": 10})
 
     # No messages - set up inotify watcher and wait
-    loop = asyncio.get_event_loop()
     message_arrived = threading.Event()
 
     class InboxHandler(FileSystemEventHandler):
@@ -1205,9 +1255,24 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             log.info("New message(s) arrived in inbox")
             return await handle_check_inbox({"limit": 10})
         else:
-            # Timeout - prompt to call again
+            # Timeout expired with no messages
             touch_heartbeat()
             log.info(f"wait_for_messages timed out after {timeout}s")
+
+            if hibernate_on_timeout:
+                # Write hibernate state so the bot knows to wake us on next message
+                _write_lobster_state(LOBSTER_STATE_FILE, "hibernate")
+                log.info("Hibernating: wrote state=hibernate, signalling graceful exit")
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"💤 No messages received in {timeout}s. "
+                        "Hibernating: state written as 'hibernate'. "
+                        "The bot will restart Claude when the next message arrives. "
+                        "EXIT now by stopping your main loop."
+                    ),
+                )]
+
             return [TextContent(
                 type="text",
                 text=f"⏰ No messages received in the last {timeout} seconds. Call `wait_for_messages` again to continue waiting."
