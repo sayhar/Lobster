@@ -111,6 +111,40 @@ class TestStateFile:
         assert data["mode"] == "hibernate"
         assert "updated_at" in data
 
+    def test_reset_state_on_startup(self, state_dir: Path):
+        """_reset_state_on_startup resets 'hibernate' to 'active' and adds woke_at."""
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "mcp"))
+        from inbox_server import _reset_state_on_startup, LOBSTER_STATE_FILE
+
+        # Write hibernate state
+        state_file = state_dir / "lobster-state.json"
+        _write_state(state_dir, "hibernate")
+        assert json.loads(state_file.read_text())["mode"] == "hibernate"
+
+        # Patch the global and call the function
+        with patch("inbox_server.LOBSTER_STATE_FILE", state_file):
+            _reset_state_on_startup()
+
+        # Verify state was reset
+        data = json.loads(state_file.read_text())
+        assert data["mode"] == "active", f"Expected 'active' after startup reset, got {data['mode']}"
+        assert "woke_at" in data, "Expected 'woke_at' timestamp after reset"
+
+    def test_reset_state_on_startup_noop_when_active(self, state_dir: Path):
+        """_reset_state_on_startup does nothing when state is already 'active'."""
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "mcp"))
+        from inbox_server import _reset_state_on_startup
+
+        state_file = state_dir / "lobster-state.json"
+        _write_state(state_dir, "active")
+        original = state_file.read_text()
+
+        with patch("inbox_server.LOBSTER_STATE_FILE", state_file):
+            _reset_state_on_startup()
+
+        # File should be unchanged (no unnecessary write)
+        assert state_file.read_text() == original
+
 
 # ---------------------------------------------------------------------------
 # 2. wait_for_messages timeout → hibernate
