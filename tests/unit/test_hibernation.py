@@ -25,12 +25,12 @@ import pytest
 # Helpers shared between test classes
 # ---------------------------------------------------------------------------
 
-def _write_state(state_dir: Path, mode: str) -> Path:
+def _write_state(state_dir: Path, mode: str, updated_at: str = "2026-01-01T00:00:00+00:00") -> Path:
     """Write a state file atomically (mirrors production implementation)."""
     state_file = state_dir / "lobster-state.json"
     tmp = state_dir / f".lobster-state-{os.getpid()}.tmp"
     tmp.write_text(
-        json.dumps({"mode": mode, "updated_at": "2026-01-01T00:00:00+00:00"})
+        json.dumps({"mode": mode, "updated_at": updated_at})
     )
     tmp.rename(state_file)
     return state_file
@@ -323,8 +323,10 @@ class TestBotWakeLogic:
                         mock_popen.assert_not_called()
 
     def test_wake_not_called_when_claude_already_running(self, state_dir: Path):
-        """Bot does NOT spawn Claude when Claude process is already running."""
-        _write_state(state_dir, "hibernate")
+        """Bot does NOT spawn Claude when Claude process is running and hibernate is fresh."""
+        from datetime import datetime, timezone
+        fresh_ts = datetime.now(timezone.utc).isoformat()
+        _write_state(state_dir, "hibernate", updated_at=fresh_ts)
 
         with patch.dict(
             os.environ,
@@ -333,7 +335,7 @@ class TestBotWakeLogic:
             with patch("subprocess.Popen") as mock_popen:
                 bot = self._import_bot_wake()
                 with patch.object(bot, "LOBSTER_STATE_FILE", state_dir / "lobster-state.json"):
-                    # Claude is already running despite hibernate state (race window)
+                    # Claude is already running with fresh hibernate state (still shutting down)
                     with patch.object(bot, "_is_claude_running", return_value=True):
                         bot.wake_claude_if_hibernating()
                         mock_popen.assert_not_called()
@@ -386,6 +388,101 @@ class TestBotWakeLogic:
         assert len(wake_calls) == 1, (
             f"Expected 1 wake call, got {len(wake_calls)}"
         )
+
+    def test_stale_hibernate_kills_zombie_and_restarts(self, state_dir: Path):
+        """When hibernate state is stale (>60s old) and Claude process exists,
+        the bot kills the zombie process and proceeds with restart."""
+        # Write a stale hibernate state (old timestamp)
+        _write_state(state_dir, "hibernate", updated_at="2020-01-01T00:00:00+00:00")
+
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
+        ):
+            mock_result = MagicMock(returncode=0, stderr="")
+            bot = self._import_bot_wake()
+
+            # _is_claude_running returns True on first call (zombie detected),
+            # then False after the kill (zombie is gone, proceed with restart)
+            running_returns = iter([True, False])
+
+            with patch.object(bot, "LOBSTER_STATE_FILE", state_dir / "lobster-state.json"):
+                with patch.object(bot, "_is_claude_running", side_effect=lambda: next(running_returns)):
+                    with patch("subprocess.run", return_value=mock_result) as mock_run:
+                        with patch("time.sleep"):  # Don't actually sleep in tests
+                            bot.wake_claude_if_hibernating()
+
+                            # Should have called pkill (to kill zombie) and systemctl restart
+                            calls = mock_run.call_args_list
+                            pkill_calls = [c for c in calls if "pkill" in str(c)]
+                            restart_calls = [c for c in calls if "systemctl" in str(c)]
+                            assert len(pkill_calls) >= 1, f"Expected pkill call, got calls: {calls}"
+                            assert len(restart_calls) >= 1, f"Expected systemctl restart call, got calls: {calls}"
+
+                            # State should be reset to active
+                            state = json.loads((state_dir / "lobster-state.json").read_text())
+                            assert state["mode"] == "active"
+
+    def test_fresh_hibernate_does_not_kill_claude(self, state_dir: Path):
+        """When hibernate state is fresh (<60s old) and Claude process exists,
+        the bot does NOT kill Claude — it returns early (Claude may still be shutting down)."""
+        from datetime import datetime, timezone
+        fresh_ts = datetime.now(timezone.utc).isoformat()
+        _write_state(state_dir, "hibernate", updated_at=fresh_ts)
+
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
+        ):
+            bot = self._import_bot_wake()
+
+            with patch.object(bot, "LOBSTER_STATE_FILE", state_dir / "lobster-state.json"):
+                with patch.object(bot, "_is_claude_running", return_value=True):
+                    with patch("subprocess.run") as mock_run:
+                        with patch("subprocess.Popen") as mock_popen:
+                            bot.wake_claude_if_hibernating()
+                            # Should NOT have called pkill or systemctl
+                            mock_run.assert_not_called()
+                            mock_popen.assert_not_called()
+
+    def test_is_hibernate_stale_no_timestamp(self):
+        """_is_hibernate_stale returns True when updated_at is missing."""
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
+        ):
+            bot = self._import_bot_wake()
+            assert bot._is_hibernate_stale({}) is True
+            assert bot._is_hibernate_stale({"mode": "hibernate"}) is True
+
+    def test_is_hibernate_stale_bad_timestamp(self):
+        """_is_hibernate_stale returns True when updated_at is unparseable."""
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
+        ):
+            bot = self._import_bot_wake()
+            assert bot._is_hibernate_stale({"updated_at": "not-a-date"}) is True
+
+    def test_is_hibernate_stale_old_timestamp(self):
+        """_is_hibernate_stale returns True when updated_at is old."""
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
+        ):
+            bot = self._import_bot_wake()
+            assert bot._is_hibernate_stale({"updated_at": "2020-01-01T00:00:00+00:00"}) is True
+
+    def test_is_hibernate_stale_fresh_timestamp(self):
+        """_is_hibernate_stale returns False when updated_at is recent."""
+        from datetime import datetime, timezone
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
+        ):
+            bot = self._import_bot_wake()
+            fresh = datetime.now(timezone.utc).isoformat()
+            assert bot._is_hibernate_stale({"updated_at": fresh}) is False
 
 
 # ---------------------------------------------------------------------------

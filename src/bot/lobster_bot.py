@@ -118,18 +118,82 @@ def _is_claude_running() -> bool:
         return False
 
 
+def _read_lobster_state_data() -> dict:
+    """Read full Lobster state data from state file.
+
+    Returns the parsed dict, or an empty dict on any error.
+    """
+    try:
+        if not LOBSTER_STATE_FILE.exists():
+            return {}
+        return json.loads(LOBSTER_STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _is_hibernate_stale(state_data: dict, max_age_seconds: int = 60) -> bool:
+    """Return True if the hibernate state is stale (updated_at older than max_age_seconds).
+
+    A stale hibernate state means Claude wrote "hibernate" but the CLI process
+    never actually exited — it's a zombie that pgrep still finds.
+    """
+    updated_at = state_data.get("updated_at")
+    if not updated_at:
+        return True  # No timestamp means we can't trust it — treat as stale
+    try:
+        ts = datetime.fromisoformat(updated_at)
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        return age > max_age_seconds
+    except Exception:
+        return True  # Unparseable timestamp — treat as stale
+
+
+def _kill_stale_claude() -> None:
+    """Kill any stale Claude processes matching --dangerously-skip-permissions."""
+    try:
+        subprocess.run(
+            ["pkill", "-f", "claude.*--dangerously-skip-permissions"],
+            capture_output=True,
+            text=True,
+        )
+        log.info("wake_claude: sent pkill to stale Claude process(es)")
+        time.sleep(3)  # Wait for process to die
+    except Exception as e:
+        log.warning(f"wake_claude: pkill failed: {e}")
+
+
 def wake_claude_if_hibernating() -> None:
     """If Lobster is hibernating and Claude is not running, spawn a fresh session.
 
     Uses a threading lock so that concurrent calls (e.g. two messages arriving
     at the same time while hibernating) only trigger a single spawn.
+
+    Handles stale hibernate state: if the state file says "hibernate" but the
+    updated_at timestamp is older than 60 seconds, the Claude CLI process is
+    likely a zombie (it wrote hibernate state but never exited). In this case,
+    force-kill the old process before restarting.
     """
-    # Fast path: if not hibernating or Claude is already up, nothing to do
-    if _read_lobster_state() != "hibernate":
+    state_data = _read_lobster_state_data()
+    mode = state_data.get("mode", "active")
+    if mode not in ("active", "hibernate"):
+        mode = "active"
+
+    # Fast path: if not hibernating, nothing to do
+    if mode != "hibernate":
         return
+
+    # Check if Claude process is running
     if _is_claude_running():
-        log.info("wake_claude: Claude already running despite hibernate state")
-        return
+        # Claude process exists — but is it a zombie from stale hibernate?
+        if _is_hibernate_stale(state_data):
+            log.warning(
+                "wake_claude: hibernate state is stale and Claude process still running — "
+                "killing zombie process"
+            )
+            _kill_stale_claude()
+        else:
+            log.info("wake_claude: Claude already running despite hibernate state")
+            return
 
     # Try to acquire the wake lock without blocking
     if not _wake_lock.acquire(blocking=False):
