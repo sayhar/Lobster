@@ -14,6 +14,7 @@
 #   2. Only fires if there isn't already a self-check in the inbox (no spam)
 #   3. Rate-limited: won't inject if last self-check was < 2 minutes ago
 #   4. Max inbox depth: won't inject if inbox already has 20+ messages (backpressure)
+#   5. Only fires if subagents are running (more than 1 Claude process)
 #===============================================================================
 
 set -e
@@ -48,6 +49,12 @@ fi
 # Guard 4: Backpressure — don't add to an already-deep inbox
 INBOX_COUNT=$(find "$INBOX_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
 if [ "$INBOX_COUNT" -ge "$MAX_INBOX_DEPTH" ]; then
+    exit 0
+fi
+
+# Guard 5: No subagents running — skip if only the main Claude process exists
+CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
+if [ "$CLAUDE_COUNT" -le 1 ]; then
     exit 0
 fi
 
