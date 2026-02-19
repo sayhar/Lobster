@@ -255,20 +255,23 @@ class TestBotWakeLogic:
         return lobster_bot
 
     def test_wake_claude_called_when_hibernating(self, state_dir: Path):
-        """Bot calls wake_claude() when state is 'hibernate'."""
+        """Bot calls wake_claude() when state is 'hibernate' and resets state to active."""
         _write_state(state_dir, "hibernate")
 
         with patch.dict(
             os.environ,
             {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_USERS": "1"},
         ):
-            with patch("subprocess.Popen") as mock_popen:
-                mock_popen.return_value = MagicMock(pid=12345)
+            mock_result = MagicMock(returncode=0, stderr="")
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
                 bot = self._import_bot_wake()
                 with patch.object(bot, "LOBSTER_STATE_FILE", state_dir / "lobster-state.json"):
                     with patch.object(bot, "_is_claude_running", return_value=False):
                         bot.wake_claude_if_hibernating()
-                        mock_popen.assert_called_once()
+                        mock_run.assert_called_once()
+                        # Verify state was reset to "active"
+                        state = json.loads((state_dir / "lobster-state.json").read_text())
+                        assert state["mode"] == "active", f"Expected mode='active' after wake, got {state['mode']}"
 
     def test_wake_not_called_when_active(self, state_dir: Path):
         """Bot does NOT spawn Claude when state is 'active'."""
@@ -321,7 +324,6 @@ class TestBotWakeLogic:
         _write_state(state_dir, "hibernate")
 
         wake_calls = []
-        lock = threading.Lock()
 
         with patch.dict(
             os.environ,
@@ -329,15 +331,14 @@ class TestBotWakeLogic:
         ):
             bot = self._import_bot_wake()
 
-            def mock_popen(*args, **kwargs):
+            def mock_run(*args, **kwargs):
                 time.sleep(0.05)  # simulate brief spawn time
                 wake_calls.append(args)
-                m = MagicMock(pid=99999)
-                return m
+                return MagicMock(returncode=0, stderr="")
 
             with patch.object(bot, "LOBSTER_STATE_FILE", state_dir / "lobster-state.json"):
                 with patch.object(bot, "_is_claude_running", return_value=False):
-                    with patch("subprocess.Popen", side_effect=mock_popen):
+                    with patch("subprocess.run", side_effect=mock_run):
                         threads = [
                             threading.Thread(target=bot.wake_claude_if_hibernating)
                             for _ in range(5)

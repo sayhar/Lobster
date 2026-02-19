@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -146,14 +146,31 @@ def wake_claude_if_hibernating() -> None:
 
         log.info("wake_claude: Lobster is hibernating and Claude is not running — waking")
 
+        # Reset state to "active" BEFORE spawning Claude.
+        # This prevents restart storms: even if spawn fails, the state is no longer
+        # "hibernate", so the health check won't skip its safety net.
+        try:
+            state_data = {"mode": "active", "woke_at": datetime.now(timezone.utc).isoformat()}
+            tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-wake-{os.getpid()}.tmp"
+            tmp.write_text(json.dumps(state_data, indent=2))
+            tmp.rename(LOBSTER_STATE_FILE)
+            log.info("wake_claude: reset state to 'active'")
+        except Exception as e:
+            log.error(f"wake_claude: failed to reset state ({e}), proceeding with wake anyway")
+
         # Preferred: restart via systemd (keeps service state consistent)
         try:
-            subprocess.Popen(
+            result = subprocess.run(
                 ["sudo", "systemctl", "restart", "lobster-claude"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
-            log.info("wake_claude: issued 'systemctl restart lobster-claude'")
+            if result.returncode == 0:
+                log.info("wake_claude: 'systemctl restart lobster-claude' succeeded")
+            else:
+                log.error(f"wake_claude: systemctl restart exited {result.returncode}: {result.stderr.strip()}")
+                raise RuntimeError("systemctl restart failed")
         except Exception as e:
             log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
             # Fallback: call start-lobster.sh directly

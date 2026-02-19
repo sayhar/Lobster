@@ -370,50 +370,45 @@ main() {
     local level="GREEN"
     local restart_reason=""
 
-    # --- Hibernation guard: if Claude intentionally exited, do not restart ---
-    if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-}" != "1" ]] && is_hibernating; then
-        log_info "HIBERNATE: Lobster is in hibernate mode - skipping Claude restart"
-        log_info "=== Health check v3 complete (level=HIBERNATE) ==="
-        exit 0
-    fi
-
-    if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-}" == "1" ]]; then
-        local mode
-        mode=$(read_lobster_mode)
-        log_info "DRY_RUN: lobster mode='$mode'"
-        if [[ "$mode" == "hibernate" ]]; then
-            log_info "DRY_RUN HIBERNATE: would skip restart in hibernate mode"
-            log_info "=== Health check v3 complete (level=HIBERNATE, dry_run=1) ==="
-            exit 0
-        fi
+    # --- Hibernation guard: skip Claude restart but still check router ---
+    local _is_hibernating=false
+    if is_hibernating; then
+        _is_hibernating=true
+        log_info "HIBERNATE: Lobster is in hibernate mode - will skip Claude restart but still check router"
     fi
 
     # --- Infrastructure checks (RED if any fail) ---
 
+    # Always check systemd services (includes router/bot) — even when hibernating
     if ! check_services; then
         level="RED"
         restart_reason="systemd service not active"
     fi
 
-    if ! check_tmux; then
-        level="RED"
-        restart_reason="tmux session missing"
-    fi
+    # Skip Claude-specific checks when hibernating (Claude intentionally exited)
+    if [[ "$_is_hibernating" == "true" ]]; then
+        log_info "HIBERNATE: Skipping Claude process, tmux, and inbox drain checks"
+    else
+        if ! check_tmux; then
+            level="RED"
+            restart_reason="tmux session missing"
+        fi
 
-    if ! check_claude_process; then
-        level="RED"
-        restart_reason="no Claude process in lobster tmux"
-    fi
+        if ! check_claude_process; then
+            level="RED"
+            restart_reason="no Claude process in lobster tmux"
+        fi
 
-    # --- Inbox drain check (overrides to RED if stale) ---
+        # --- Inbox drain check (overrides to RED if stale) ---
 
-    check_inbox_drain
-    local inbox_rc=$?
-    if [[ $inbox_rc -eq 2 ]]; then
-        level="RED"
-        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-    elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-        level="YELLOW"
+        check_inbox_drain
+        local inbox_rc=$?
+        if [[ $inbox_rc -eq 2 ]]; then
+            level="RED"
+            restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+        elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+            level="YELLOW"
+        fi
     fi
 
     # --- Resource checks (RED if critical) ---

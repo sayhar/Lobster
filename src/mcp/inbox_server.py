@@ -90,6 +90,24 @@ HEARTBEAT_FILE = Path.home() / "lobster-workspace" / "logs" / "claude-heartbeat"
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 
+# Reset state to "active" on startup — this is the fix for the critical bug where
+# state was never reset after waking from hibernation.
+# The bot issues systemctl restart → Claude starts → this module loads → state resets.
+def _reset_state_on_startup():
+    try:
+        if LOBSTER_STATE_FILE.exists():
+            data = json.loads(LOBSTER_STATE_FILE.read_text())
+            if data.get("mode") == "hibernate":
+                data["mode"] = "active"
+                data["woke_at"] = datetime.now(timezone.utc).isoformat()
+                tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-{os.getpid()}.tmp"
+                tmp.write_text(json.dumps(data, indent=2))
+                tmp.rename(LOBSTER_STATE_FILE)
+    except Exception:
+        pass  # If we can't reset, _read_lobster_state defaults to "active" anyway
+
+_reset_state_on_startup()
+
 # Scheduled Tasks Directories
 SCHEDULED_TASKS_DIR = Path.home() / "lobster" / "scheduled-tasks"
 SCHEDULED_JOBS_FILE = SCHEDULED_TASKS_DIR / "jobs.json"
