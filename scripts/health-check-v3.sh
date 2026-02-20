@@ -260,6 +260,28 @@ check_inbox_drain() {
     local total_count=0
 
     while IFS= read -r -d '' f; do
+        # Skip system/task-output messages — they aren't user messages and
+        # shouldn't trigger stale-inbox restarts.  Only count messages that
+        # have "telegram" or "sms" or "signal" as source (i.e. real user msgs).
+        if command -v python3 &>/dev/null; then
+            local msg_type
+            msg_type=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$f'))
+    t = d.get('type','')
+    s = d.get('source','')
+    # task-output / system / scheduled-job messages are non-urgent
+    if t in ('task-output','system') or s in ('daily-health-check','self-check','scheduled-job'):
+        print('skip')
+    else:
+        print('check')
+except Exception:
+    print('check')
+" 2>/dev/null)
+            [[ "$msg_type" == "skip" ]] && continue
+        fi
+
         total_count=$((total_count + 1))
         local file_time
         file_time=$(stat -c %Y "$f" 2>/dev/null)
@@ -326,12 +348,24 @@ do_restart() {
 
     if ! can_restart; then
         log_error "BLACK: Max restart attempts ($MAX_RESTART_ATTEMPTS) in ${RESTART_COOLDOWN_SECONDS}s window"
-        send_telegram_alert "System unrecoverable after $MAX_RESTART_ATTEMPTS restart attempts.
+
+        # Silence guard: only send BLACK alert once per 30 minutes to avoid spam
+        local BLACK_ALERT_FILE="$HOME/lobster-workspace/logs/health-last-black-alert"
+        local now_ts
+        now_ts=$(date +%s)
+        local last_alert=0
+        [[ -f "$BLACK_ALERT_FILE" ]] && last_alert=$(cat "$BLACK_ALERT_FILE" 2>/dev/null)
+        if [[ $((now_ts - last_alert)) -gt 1800 ]]; then
+            send_telegram_alert "System unrecoverable after $MAX_RESTART_ATTEMPTS restart attempts.
 
 Reason: $reason
 
 Manual intervention required:
 \`lobster restart\`"
+            echo "$now_ts" > "$BLACK_ALERT_FILE"
+        else
+            log_info "BLACK alert suppressed (last sent $((now_ts - last_alert))s ago, threshold 1800s)"
+        fi
         return 1
     fi
 
