@@ -17,3 +17,12 @@ users:
 # Disable root SSH login
 ssh_pwauth: false
 disable_root: true
+
+package_upgrade: true
+packages:
+  - mosh
+
+power_state:
+  mode: reboot
+  message: "Rebooting after package upgrade"
+  condition: true
