@@ -1504,12 +1504,12 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         fi
 
         if $AUTH_CMD; then
-            # Verify the auth actually works (not just that credentials exist)
-            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                success "OAuth authentication successful (verified)!"
+            # Verify auth status (don't run inference — it can fail for unrelated reasons)
+            if claude auth status &>/dev/null 2>&1; then
+                success "Authentication successful!"
             else
-                warn "Auth command completed but API verification failed."
-                warn "The token may have expired or the code exchange didn't complete."
+                warn "Auth command completed but status check failed."
+                warn "The token may not have been saved correctly."
                 echo ""
                 echo "Falling back to API key..."
                 AUTH_METHOD="apikey_fallback"
