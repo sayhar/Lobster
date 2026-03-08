@@ -1524,13 +1524,12 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         IS_HEADLESS=true
         echo -e "${YELLOW}Headless server detected (no display).${NC}"
         echo ""
-        echo "'claude auth login' will display a URL — open it in any browser"
+        echo "'claude setup-token' will display a URL — open it in any browser"
         echo "(phone, laptop, etc.), authorize, then paste the code back here."
-        echo "This persists credentials with a refresh token."
         echo ""
         echo -e "Alternatively, you can use an ${BOLD}API key${NC} instead (billed per-token)."
         echo ""
-        echo "  1) Use auth login (OAuth via URL + code paste, recommended)"
+        echo "  1) Use setup-token (OAuth via URL + code paste, recommended)"
         echo "  2) Use an API key instead"
         echo ""
         read -p "Choose [1/2]: " HEADLESS_CHOICE
@@ -1547,22 +1546,62 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         read -p "Press Enter to continue..."
         echo ""
 
-        # Launch claude interactively — it triggers OAuth on first run.
-        # claude auth login can hang after browser auth completes, so we
-        # use the normal interactive flow instead, then verify with auth status.
-        echo "Launching Claude Code for first-time authentication..."
-        echo "Complete the OAuth flow, then type /exit to return to the installer."
-        echo ""
-        claude
+        if [ "$IS_HEADLESS" = true ]; then
+            # On headless servers, 'claude auth login' hangs after browser auth.
+            # Use 'claude setup-token' which works interactively in the terminal.
+            # setup-token may not persist the token to disk, so we capture output
+            # and save it to config.env if needed.
+            echo "Running 'claude setup-token' for headless authentication..."
+            echo ""
+            SETUP_OUTPUT=$(claude setup-token 2>&1 | tee /dev/tty)
 
-        # Verify credentials were persisted
-        sleep 1
-        if claude auth status &>/dev/null 2>&1; then
-            success "Authentication successful (verified)!"
+            sleep 1
+            if claude auth status &>/dev/null 2>&1; then
+                success "Authentication successful (verified)!"
+            else
+                # Token wasn't persisted — try to extract it from output and save
+                # setup-token may output the token directly or in a known format
+                EXTRACTED_TOKEN=$(echo "$SETUP_OUTPUT" | grep -oP '(?<=token: |Token: |TOKEN=).*' | head -1 || true)
+                if [ -z "$EXTRACTED_TOKEN" ]; then
+                    # Try to grab the last long alphanumeric string (likely the token)
+                    EXTRACTED_TOKEN=$(echo "$SETUP_OUTPUT" | grep -oE '[A-Za-z0-9_-]{40,}' | tail -1 || true)
+                fi
+
+                if [ -n "$EXTRACTED_TOKEN" ] && [ -f "$CONFIG_FILE" ]; then
+                    echo "" >> "$CONFIG_FILE"
+                    echo "# Claude Code OAuth token (from setup-token, headless auth)" >> "$CONFIG_FILE"
+                    echo "CLAUDE_CODE_OAUTH_TOKEN=$EXTRACTED_TOKEN" >> "$CONFIG_FILE"
+                    info "Token saved to config.env as CLAUDE_CODE_OAUTH_TOKEN"
+
+                    # Verify with the token set
+                    if CLAUDE_CODE_OAUTH_TOKEN="$EXTRACTED_TOKEN" claude auth status &>/dev/null 2>&1; then
+                        success "Authentication successful (verified with saved token)!"
+                    else
+                        warn "Token was saved but verification still failed."
+                        warn "You may need to re-authenticate later: claude setup-token"
+                    fi
+                else
+                    warn "Could not verify or extract authentication token."
+                    warn "If Lobster can't authenticate later, try: claude setup-token"
+                    AUTH_METHOD="apikey_fallback"
+                fi
+            fi
         else
-            warn "Could not verify authentication."
-            warn "If Lobster can't authenticate later, try running: claude"
-            AUTH_METHOD="apikey_fallback"
+            # On systems with a display, auth login works normally
+            echo "Running 'claude auth login'..."
+            echo ""
+            if claude auth login; then
+                sleep 1
+                if claude auth status &>/dev/null 2>&1; then
+                    success "Authentication successful (verified)!"
+                else
+                    warn "Auth command completed but verification failed."
+                    AUTH_METHOD="apikey_fallback"
+                fi
+            else
+                warn "OAuth authentication failed or was cancelled."
+                AUTH_METHOD="apikey_fallback"
+            fi
         fi
     fi
 fi
