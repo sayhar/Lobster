@@ -1568,44 +1568,32 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         echo ""
 
         if [ "$IS_HEADLESS" = true ]; then
-            # On headless servers, 'claude auth login' hangs after browser auth.
-            # Use 'claude setup-token' which works interactively in the terminal.
-            # setup-token may not persist the token to disk, so we capture output
-            # and save it to config.env if needed.
             echo "Running 'claude setup-token' for headless authentication..."
             echo ""
-            SETUP_OUTPUT=$(claude setup-token 2>&1 | tee /dev/tty)
+            echo "After completing the flow, you'll need to paste the token back here."
+            echo ""
 
-            sleep 1
-            if claude auth status &>/dev/null 2>&1; then
-                success "Authentication successful (verified)!"
+            # Run setup-token with full TTY access (no piping)
+            claude setup-token
+
+            echo ""
+            echo -e "${BOLD}Paste the OAuth token from above:${NC}"
+            read -r OAUTH_TOKEN
+
+            if [ -n "$OAUTH_TOKEN" ]; then
+                # Save token to config.env
+                if [ -f "$CONFIG_FILE" ]; then
+                    # Remove any existing CLAUDE_CODE_OAUTH_TOKEN line
+                    grep -v "CLAUDE_CODE_OAUTH_TOKEN" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null || true
+                    mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+                fi
+                echo "" >> "$CONFIG_FILE"
+                echo "# Claude Code OAuth token (from setup-token)" >> "$CONFIG_FILE"
+                echo "export CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_TOKEN" >> "$CONFIG_FILE"
+
+                success "OAuth token saved to config.env"
             else
-                # Token wasn't persisted — try to extract it from output and save
-                # setup-token may output the token directly or in a known format
-                EXTRACTED_TOKEN=$(echo "$SETUP_OUTPUT" | grep -oP '(?<=token: |Token: |TOKEN=).*' | head -1 || true)
-                if [ -z "$EXTRACTED_TOKEN" ]; then
-                    # Try to grab the last long alphanumeric string (likely the token)
-                    EXTRACTED_TOKEN=$(echo "$SETUP_OUTPUT" | grep -oE '[A-Za-z0-9_-]{40,}' | tail -1 || true)
-                fi
-
-                if [ -n "$EXTRACTED_TOKEN" ] && [ -f "$CONFIG_FILE" ]; then
-                    echo "" >> "$CONFIG_FILE"
-                    echo "# Claude Code OAuth token (from setup-token, headless auth)" >> "$CONFIG_FILE"
-                    echo "CLAUDE_CODE_OAUTH_TOKEN=$EXTRACTED_TOKEN" >> "$CONFIG_FILE"
-                    info "Token saved to config.env as CLAUDE_CODE_OAUTH_TOKEN"
-
-                    # Verify with the token set
-                    if CLAUDE_CODE_OAUTH_TOKEN="$EXTRACTED_TOKEN" claude auth status &>/dev/null 2>&1; then
-                        success "Authentication successful (verified with saved token)!"
-                    else
-                        warn "Token was saved but verification still failed."
-                        warn "You may need to re-authenticate later: claude setup-token"
-                    fi
-                else
-                    warn "Could not verify or extract authentication token."
-                    warn "If Lobster can't authenticate later, try: claude setup-token"
-                    AUTH_METHOD="apikey_fallback"
-                fi
+                warn "No token provided. You'll need to set CLAUDE_CODE_OAUTH_TOKEN manually."
             fi
         else
             # On systems with a display, auth login works normally
@@ -1683,6 +1671,22 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
             echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> "$CONFIG_FILE"
         fi
     fi
+fi
+
+# Ensure Claude Code onboarding is skipped (headless servers can't do interactive onboarding)
+CLAUDE_JSON="$HOME/.claude.json"
+if [ ! -f "$CLAUDE_JSON" ]; then
+    echo '{"hasCompletedOnboarding":true}' > "$CLAUDE_JSON"
+    success "Created ~/.claude.json with onboarding bypass"
+elif ! grep -q '"hasCompletedOnboarding"' "$CLAUDE_JSON" 2>/dev/null; then
+    if command -v jq &>/dev/null; then
+        tmp=$(mktemp)
+        jq '. + {"hasCompletedOnboarding": true}' "$CLAUDE_JSON" > "$tmp" && mv "$tmp" "$CLAUDE_JSON"
+    else
+        # Fallback: just rewrite with the flag
+        echo '{"hasCompletedOnboarding":true}' > "$CLAUDE_JSON"
+    fi
+    success "Added onboarding bypass to ~/.claude.json"
 fi
 
 #===============================================================================
