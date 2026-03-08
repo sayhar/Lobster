@@ -543,19 +543,23 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
     # Add to PATH for current session
     export PATH="$HOME/.local/bin:$PATH"
 
+    # Persist ~/.local/bin to PATH in shell config files
+    PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+    for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc"; do
+        if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
+            echo "" >> "$rc"
+            echo "# Added by Lobster installer" >> "$rc"
+            echo "$PATH_LINE" >> "$rc"
+            info "Added ~/.local/bin to PATH in $rc"
+        fi
+    done
+
     if command -v claude &>/dev/null; then
         success "Claude Code installed"
     else
         error "Claude Code installation failed"
         exit 1
     fi
-
-    # Persist PATH for future shell sessions
-    for RC_FILE in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
-        if [ -f "$RC_FILE" ] && ! grep -q '.local/bin' "$RC_FILE" 2>/dev/null; then
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC_FILE"
-        fi
-    done
 fi
 
 # Check if Claude Code already has a valid OAuth session
@@ -563,8 +567,16 @@ step "Checking existing Claude Code authentication..."
 
 EXISTING_OAUTH=false
 if claude auth status &>/dev/null 2>&1; then
-    success "Claude Code already authenticated via OAuth"
-    EXISTING_OAUTH=true
+    # auth status only checks if credentials exist, not if they're valid.
+    # Verify the token actually works by making a real API call.
+    info "Credentials found, verifying token is still valid..."
+    if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
+        success "Claude Code authenticated via OAuth (token verified)"
+        EXISTING_OAUTH=true
+    else
+        warn "OAuth credentials exist but token is expired or invalid."
+        warn "You'll need to re-authenticate during the auth setup step."
+    fi
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     success "ANTHROPIC_API_KEY found in environment"
 fi
@@ -616,27 +628,12 @@ else
         info "Existing tarball install found (v$(cat "$INSTALL_DIR/VERSION")). Updating..."
     fi
 
-    # Fetch latest release from GitHub API (fall back to git clone on failure)
-    RELEASE_JSON=$(curl -fsSL "$GITHUB_API/releases/latest" 2>/dev/null) || {
-        warn "Failed to fetch latest release from GitHub. Falling back to git clone..."
-        INSTALL_MODE="git"
-        git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
-        cd "$INSTALL_DIR"
-        success "Repository ready at $INSTALL_DIR (git fallback)"
-        RELEASE_JSON=""
-    }
+    # Fetch latest release from GitHub API; fall back to git clone on any error
+    RELEASE_JSON=$(curl -fsSL "$GITHUB_API/releases/latest" 2>/dev/null) || true
+    LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
 
-    if [ -n "$RELEASE_JSON" ]; then
-        LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
-    else
-        LATEST_TAG=""
-    fi
-
-    if [ -z "$RELEASE_JSON" ]; then
-        : # Already fell back to git clone above
-    elif [ -z "$LATEST_TAG" ]; then
-        warn "Could not parse release tag. Falling back to git clone..."
-        INSTALL_MODE="git"
+    if [ -z "$LATEST_TAG" ]; then
+        info "No release found, falling back to git clone..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
         success "Repository ready at $INSTALL_DIR (git fallback)"
@@ -1470,28 +1467,59 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
     echo ""
     info "Starting OAuth authentication..."
     echo ""
-    echo "Claude Code will generate an authentication URL."
-    echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
-    echo ""
-    read -p "Press Enter to continue..."
-    echo ""
 
-    # Run auth login interactively - it will display the URL
-    if claude auth login; then
-        # Verify the auth actually worked
-        if claude auth status &>/dev/null 2>&1; then
-            success "OAuth authentication successful!"
+    # Detect headless environment
+    IS_HEADLESS=false
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && ! command -v open &>/dev/null; then
+        IS_HEADLESS=true
+        echo -e "${YELLOW}Headless server detected (no display).${NC}"
+        echo ""
+        echo "For headless authentication, we recommend using 'claude setup-token'."
+        echo "It will display a URL — open it in any browser (phone, laptop, etc.),"
+        echo "authorize, then paste the code back here when prompted."
+        echo ""
+        echo -e "Alternatively, you can use an ${BOLD}API key${NC} instead (billed per-token)."
+        echo ""
+        echo "  1) Try setup-token (OAuth via URL + code paste)"
+        echo "  2) Use an API key instead"
+        echo ""
+        read -p "Choose [1/2]: " HEADLESS_CHOICE
+        if [ "$HEADLESS_CHOICE" = "2" ]; then
+            AUTH_METHOD="apikey_fallback"
+        fi
+    fi
+
+    if [ "$AUTH_METHOD" = "oauth" ]; then
+        echo ""
+        echo "Claude Code will generate an authentication URL."
+        echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
+        echo ""
+        read -p "Press Enter to continue..."
+        echo ""
+
+        # Use setup-token on headless, auth login otherwise
+        AUTH_CMD="claude auth login"
+        if [ "$IS_HEADLESS" = true ]; then
+            AUTH_CMD="claude setup-token"
+        fi
+
+        if $AUTH_CMD; then
+            # Verify the auth actually works (not just that credentials exist)
+            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
+                success "OAuth authentication successful (verified)!"
+            else
+                warn "Auth command completed but API verification failed."
+                warn "The token may have expired or the code exchange didn't complete."
+                echo ""
+                echo "Falling back to API key..."
+                AUTH_METHOD="apikey_fallback"
+            fi
         else
-            warn "Auth command completed but verification failed."
+            warn "OAuth authentication failed or was cancelled."
             echo ""
             echo "Falling back to API key..."
             AUTH_METHOD="apikey_fallback"
         fi
-    else
-        warn "OAuth authentication failed or was cancelled."
-        echo ""
-        echo "Falling back to API key..."
-        AUTH_METHOD="apikey_fallback"
     fi
 fi
 
@@ -1554,13 +1582,32 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
 fi
 
 # --- Select the Claude launcher ---
-# The persistent launcher (claude-persistent.sh) replaces the old polling
-# wrappers. It runs Claude in a persistent session with wait_for_messages()
-# and handles lifecycle (restart, hibernate, backoff) internally.
-info "Using persistent lifecycle launcher: claude-persistent.sh"
-CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
-chmod +x "$CLAUDE_WRAPPER"
+# Choose the appropriate wrapper based on auth method and environment.
+# - claude-persistent.sh: Persistent interactive session (OAuth, has TTY)
+# - claude-wrapper.sh: Headless polling mode (API key, or no TTY)
+# - claude-wrapper.exp: Expect-based interactive (legacy, needs TTY + OAuth)
 
+if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
+    # API key mode: use headless polling wrapper (no interactive session needed)
+    info "API key auth: using headless polling launcher (claude-wrapper.sh)"
+    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.sh"
+elif [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && ! command -v open &>/dev/null; then
+    # Headless server with OAuth: use persistent launcher if available,
+    # fall back to headless wrapper
+    if [ -f "$INSTALL_DIR/scripts/claude-persistent.sh" ]; then
+        info "Headless + OAuth: using persistent lifecycle launcher"
+        CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
+    else
+        info "Headless + OAuth: using headless polling launcher (claude-wrapper.sh)"
+        CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.sh"
+    fi
+else
+    # Desktop/TTY environment with OAuth: use persistent launcher
+    info "Using persistent lifecycle launcher: claude-persistent.sh"
+    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
+fi
+
+chmod +x "$CLAUDE_WRAPPER"
 success "Claude wrapper: $CLAUDE_WRAPPER"
 
 #===============================================================================
@@ -1848,13 +1895,6 @@ cat << 'DONE'
 DONE
 echo -e "${NC}"
 
-if [ "$NON_INTERACTIVE" = true ]; then
-    echo ""
-    echo -e "${YELLOW}Installed in non-interactive mode.${NC}"
-    echo "Some steps were skipped. To complete setup, run the installer interactively:"
-    echo "  bash $INSTALL_DIR/install.sh"
-    echo ""
-fi
 echo "Test it by sending a message to your Telegram bot!"
 echo ""
 echo -e "${BOLD}Commands:${NC}"
@@ -1876,5 +1916,12 @@ if [ "$INSTALL_MODE" = "tarball" ]; then
     echo -e "${BOLD}Install mode:${NC} tarball (upgrade with: lobster upgrade)"
 else
     echo -e "${BOLD}Install mode:${NC} git (upgrade with: git pull or lobster upgrade)"
+fi
+if [ "$NON_INTERACTIVE" = true ]; then
+    echo ""
+    echo -e "${YELLOW}Installed in non-interactive mode.${NC}"
+    echo "Some steps were skipped. To complete setup, run the installer interactively:"
+    echo "  bash $INSTALL_DIR/install.sh"
+    echo ""
 fi
 echo ""
