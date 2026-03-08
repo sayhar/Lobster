@@ -422,6 +422,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         fd-find
         bat
         fzf
+        mosh
     )
 
     for pkg in "${PACKAGES[@]}"; do
@@ -447,6 +448,7 @@ else
         gcc-c++
         cmake
         make
+        mosh
     )
 
     for pkg in "${DNF_PACKAGES[@]}"; do
