@@ -1,21 +1,23 @@
 #!/bin/bash
 #===============================================================================
-# Lobster Bootstrap Installer (v2)
+# Lobster Bootstrap Installer
 #
 # Usage: bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 #
 # This script sets up a complete Lobster installation on a fresh VM:
-# - Installs system dependencies (Ubuntu/Debian)
-# - Clones the repo
+# - Installs system dependencies (Ubuntu/Debian or Amazon Linux 2023/Fedora)
+# - Clones the repo (if needed)
 # - Walks through configuration
-# - Sets up Python environment (via uv)
+# - Sets up Python environment
 # - Registers MCP servers with Claude
 # - Installs and starts systemd services
-#
-# Target: Ubuntu 24.04 ARM (Hetzner CAX) -- also works on x86_64
 #===============================================================================
 
-set -euo pipefail
+set -e
+
+# Suppress needrestart interactive prompts during unattended installs
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 
 # Colors
 RED='\033[0;31m'
@@ -31,9 +33,9 @@ info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
-step() { echo -e "\n${CYAN}${BOLD}>>> $1${NC}"; }
+step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
-# Parse arguments
+# Parse install mode from arguments
 DEV_MODE=false
 for arg in "$@"; do
     case "$arg" in
@@ -41,7 +43,7 @@ for arg in "$@"; do
     esac
 done
 
-# Configuration - can be overridden by environment variables
+# Configuration - can be overridden by environment variables or config file
 REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
 REPO_BRANCH="${LOBSTER_BRANCH:-main}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
@@ -49,6 +51,42 @@ WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 GITHUB_REPO="SiderealPress/lobster"
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO"
+
+#===============================================================================
+# Package Manager Detection
+#===============================================================================
+
+if command -v apt-get &>/dev/null; then
+    PKG_MANAGER="apt"
+elif command -v dnf &>/dev/null; then
+    PKG_MANAGER="dnf"
+else
+    echo "Unsupported package manager. Install requires apt-get or dnf."
+    exit 1
+fi
+
+# install_pkg <pkg-apt> [pkg-dnf]
+# If only one argument is given, uses the same name for both managers.
+install_pkg() {
+    local pkg_apt="$1"
+    local pkg_dnf="${2:-$1}"
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo apt-get install -y -qq "$pkg_apt"
+    else
+        sudo dnf install -y "$pkg_dnf"
+    fi
+}
+
+# pkg_installed <name>  -- true when dpkg/rpm reports the package installed
+pkg_installed() {
+    local name="$1"
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        dpkg -s "$name" &>/dev/null
+    else
+        rpm -q "$name" &>/dev/null
+    fi
+}
 
 #===============================================================================
 # Load Configuration
@@ -79,6 +117,7 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     REPO_BRANCH="${LOBSTER_BRANCH:-$REPO_BRANCH}"
     INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$INSTALL_DIR}"
     WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$WORKSPACE_DIR}"
+    PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
     MESSAGES_DIR="${LOBSTER_MESSAGES:-$MESSAGES_DIR}"
 fi
 
@@ -86,7 +125,7 @@ fi
 LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
 LOBSTER_GROUP="${LOBSTER_GROUP:-${USER:-$(whoami)}}"
 LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
-CONFIG_DIR="${LOBSTER_CONFIG_DIR:-}"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
 
 #===============================================================================
 # Template Processing
@@ -142,7 +181,7 @@ apply_private_overlay() {
 
     # Copy config.env if exists
     if [ -f "$config_dir/config.env" ]; then
-        cp "$config_dir/config.env" "$INSTALL_DIR/config/config.env"
+        cp "$config_dir/config.env" "$CONFIG_DIR/config.env"
         success "Applied: config.env"
     fi
 
@@ -216,6 +255,7 @@ run_hook() {
     # Export useful variables for hooks
     export LOBSTER_INSTALL_DIR="$INSTALL_DIR"
     export LOBSTER_WORKSPACE_DIR="$WORKSPACE_DIR"
+    export LOBSTER_PROJECTS_DIR="$PROJECTS_DIR"
     export LOBSTER_MESSAGES_DIR="$MESSAGES_DIR"
 
     "$hook_path"
@@ -235,12 +275,12 @@ echo -e "${BLUE}"
 cat << 'BANNER'
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   ██╗  ██╗██╗   ██╗██████╗ ███████╗██████╗ ██╗ ██████╗ ███╗   ██╗  ║
-║   ██║  ██║╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗██║██╔═══██╗████╗  ██║  ║
-║   ███████║ ╚████╔╝ ██████╔╝█████╗  ██████╔╝██║██║   ██║██╔██╗ ██║  ║
-║   ██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══╝  ██╔══██╗██║██║   ██║██║╚██╗██║  ║
-║   ██║  ██║   ██║   ██║     ███████╗██║  ██║██║╚██████╔╝██║ ╚████║  ║
-║   ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝  ║
+║   ██╗      ██████╗ ██████╗ ███████╗████████╗███████╗██████╗   ║
+║   ██║     ██╔═══██╗██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔══██╗  ║
+║   ██║     ██║   ██║██████╔╝███████╗   ██║   █████╗  ██████╔╝  ║
+║   ██║     ██║   ██║██╔══██╗╚════██║   ██║   ██╔══╝  ██╔══██╗  ║
+║   ███████╗╚██████╔╝██████╔╝███████║   ██║   ███████╗██║  ██║  ║
+║   ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝  ║
 ║                                                               ║
 ║         Always-on Claude Code Message Processor               ║
 ║                                                               ║
@@ -259,17 +299,12 @@ fi
 
 step "Running pre-flight checks..."
 
-# Check OS
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
-        warn "This script is designed for Ubuntu/Debian. Detected: $ID"
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
-    fi
+# Report detected package manager
+info "Detected package manager: $PKG_MANAGER"
+if [ "$PKG_MANAGER" = "apt" ]; then
+    success "Ubuntu/Debian system detected"
 else
-    warn "Cannot detect OS. Proceeding anyway..."
+    success "dnf-based system detected (Amazon Linux 2023 / Fedora)"
 fi
 
 # Check if running interactively
@@ -327,31 +362,167 @@ fi
 
 step "Installing system dependencies..."
 
-sudo apt-get update -qq
+if [ "$PKG_MANAGER" = "apt" ]; then
+    sudo apt-get update -qq
+    sudo apt-get upgrade -y -qq
 
-# Essential packages
-PACKAGES=(
-    curl
-    wget
-    git
-    jq
-    python3
-    python3-pip
-    python3-venv
-    cron
-    at
-    expect
-    tmux
-)
+    PACKAGES=(
+        curl
+        wget
+        git
+        jq
+        python3
+        python3-pip
+        python3-venv
+        cron
+        at
+        expect
+        tmux
+        build-essential
+        cmake
+        ffmpeg
+        ripgrep
+        fd-find
+        bat
+        fzf
+    )
 
-for pkg in "${PACKAGES[@]}"; do
-    if ! dpkg -s "$pkg" &>/dev/null; then
-        info "Installing $pkg..."
-        sudo apt-get install -y -qq "$pkg"
+    for pkg in "${PACKAGES[@]}"; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            info "Installing $pkg..."
+            sudo apt-get install -y -qq "$pkg"
+        fi
+    done
+else
+    # dnf (Amazon Linux 2023 / Fedora)
+    DNF_PACKAGES=(
+        curl
+        wget
+        git
+        jq
+        python3
+        python3-pip
+        cronie
+        at
+        expect
+        tmux
+        gcc-c++
+        cmake
+        make
+    )
+
+    for pkg in "${DNF_PACKAGES[@]}"; do
+        if ! rpm -q "$pkg" &>/dev/null; then
+            info "Installing $pkg..."
+            sudo dnf install -y "$pkg"
+        fi
+    done
+fi
+
+success "Core system dependencies installed"
+
+#===============================================================================
+# Install Modern CLI Tools (ripgrep, fd, bat, fzf) on dnf systems
+#
+# Ubuntu/Debian provides these in apt. On Amazon Linux 2023 / Fedora they are
+# not in the default repos, so we download pre-built binaries from GitHub.
+#===============================================================================
+
+if [ "$PKG_MANAGER" = "dnf" ]; then
+    step "Installing modern CLI tools from GitHub releases (dnf fallback)..."
+
+    ARCH=$(uname -m)
+    TOOLS_BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$TOOLS_BIN_DIR"
+
+    # install_github_binary <owner/repo> <binary-name> <asset-grep-pattern>
+    # Downloads the latest GitHub release asset whose URL matches <asset-grep-pattern>,
+    # extracts the named binary, and places it in TOOLS_BIN_DIR.
+    install_github_binary() {
+        local repo="$1"
+        local binary="$2"
+        local asset_pattern="$3"
+
+        if command -v "$binary" &>/dev/null; then
+            success "$binary already installed"
+            return 0
+        fi
+
+        info "Fetching latest $binary from github.com/$repo ..."
+        local api_url="https://api.github.com/repos/${repo}/releases/latest"
+        local asset_url
+        asset_url=$(curl -fsSL "$api_url" | jq -r ".assets[].browser_download_url" | grep "$asset_pattern" | head -1)
+
+        if [ -z "$asset_url" ]; then
+            warn "Could not find $binary release asset matching '$asset_pattern'. Skipping."
+            return 0
+        fi
+
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        local archive="$tmp_dir/$(basename "$asset_url")"
+        curl -fsSL "$asset_url" -o "$archive"
+
+        if [[ "$archive" == *.tar.gz || "$archive" == *.tgz ]]; then
+            tar -xzf "$archive" -C "$tmp_dir"
+        elif [[ "$archive" == *.zip ]]; then
+            unzip -q "$archive" -d "$tmp_dir"
+        fi
+
+        # Find the binary anywhere in the extracted tree
+        local bin_path
+        bin_path=$(find "$tmp_dir" -type f -name "$binary" | head -1)
+        if [ -n "$bin_path" ]; then
+            cp "$bin_path" "$TOOLS_BIN_DIR/$binary"
+            chmod +x "$TOOLS_BIN_DIR/$binary"
+            success "$binary installed to $TOOLS_BIN_DIR/$binary"
+        else
+            warn "$binary binary not found in extracted archive. Skipping."
+        fi
+
+        rm -rf "$tmp_dir"
+    }
+
+    case "$ARCH" in
+        x86_64)  RG_ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64) RG_ARCH="aarch64-unknown-linux-gnu" ;;
+        *)       RG_ARCH="x86_64-unknown-linux-musl" ;;
+    esac
+    install_github_binary "BurntSushi/ripgrep" "rg" "${RG_ARCH}"
+
+    case "$ARCH" in
+        x86_64)  FD_ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64) FD_ARCH="aarch64-unknown-linux-gnu" ;;
+        *)       FD_ARCH="x86_64-unknown-linux-musl" ;;
+    esac
+    install_github_binary "sharkdp/fd" "fd" "${FD_ARCH}"
+
+    case "$ARCH" in
+        x86_64)  BAT_ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64) BAT_ARCH="aarch64-unknown-linux-gnu" ;;
+        *)       BAT_ARCH="x86_64-unknown-linux-musl" ;;
+    esac
+    install_github_binary "sharkdp/bat" "bat" "${BAT_ARCH}"
+
+    case "$ARCH" in
+        x86_64)  FZF_ARCH="linux_amd64" ;;
+        aarch64) FZF_ARCH="linux_arm64" ;;
+        *)       FZF_ARCH="linux_amd64" ;;
+    esac
+    install_github_binary "junegunn/fzf" "fzf" "${FZF_ARCH}"
+
+    # Ensure ~/.local/bin is on PATH for this session and future shells
+    if [[ ":$PATH:" != *":$TOOLS_BIN_DIR:"* ]]; then
+        export PATH="$TOOLS_BIN_DIR:$PATH"
+        for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+            if [ -f "$rc" ] && ! grep -q "$TOOLS_BIN_DIR" "$rc"; then
+                echo "export PATH=\"$TOOLS_BIN_DIR:\$PATH\"" >> "$rc"
+            fi
+        done
     fi
-done
 
-success "System dependencies installed"
+    success "Modern CLI tools installed"
+fi
 
 #===============================================================================
 # Install Claude Code
@@ -362,8 +533,13 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
 
     curl -fsSL https://claude.ai/install.sh | bash
 
-    # Add to PATH for current session
+    # Add to PATH for current session and persist for future shells
     export PATH="$HOME/.local/bin:$PATH"
+    for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        if [ -f "$rc" ] && ! grep -q '$HOME/.local/bin' "$rc"; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"
+        fi
+    done
 
     if command -v claude &>/dev/null; then
         success "Claude Code installed"
@@ -386,36 +562,139 @@ fi
 # Full auth flow runs later after Telegram config (see "Authentication Method" section)
 
 #===============================================================================
-# Clone Repository
+# Install Lobster Code
 #===============================================================================
 
-step "Setting up Lobster repository..."
-
+# Detect install mode: --dev flag, existing .git, or tarball
 if [ -d "$INSTALL_DIR/.git" ]; then
-    info "Repository exists. Updating..."
-    cd "$INSTALL_DIR"
-    git fetch --quiet
-    git checkout --quiet "$REPO_BRANCH"
-    git pull --quiet origin "$REPO_BRANCH"
+    INSTALL_MODE="git"
+    info "Existing git install detected"
+elif $DEV_MODE; then
+    INSTALL_MODE="git"
+    info "Developer mode requested"
 else
-    info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
-    git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
+    INSTALL_MODE="tarball"
+    info "Tarball install mode"
 fi
 
-success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
+if [ "$INSTALL_MODE" = "git" ]; then
+    step "Setting up Lobster repository..."
 
-#===============================================================================
-# Configure Distributed Git Hooks
-#===============================================================================
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        info "Repository exists. Updating..."
+        cd "$INSTALL_DIR"
+        git fetch --quiet
+        git checkout --quiet "$REPO_BRANCH"
+        git pull --quiet origin "$REPO_BRANCH"
+    else
+        info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
+        git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+    fi
 
-step "Configuring distributed git hooks..."
+    success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 
-cd "$INSTALL_DIR"
-git config --local core.hooksPath .githooks
-chmod +x .githooks/pre-push .githooks/post-checkout 2>/dev/null || true
+    step "Configuring distributed git hooks..."
+    cd "$INSTALL_DIR"
+    git config --local core.hooksPath .githooks
+    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit 2>/dev/null || true
+    success "Git hooks configured (core.hooksPath -> .githooks)"
 
-success "Git hooks configured (core.hooksPath -> .githooks)"
+else
+    step "Downloading latest Lobster release..."
+
+    if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/VERSION" ]; then
+        info "Existing tarball install found (v$(cat "$INSTALL_DIR/VERSION")). Updating..."
+    fi
+
+    # Fetch latest release from GitHub API (may 404 if no releases exist yet)
+    RELEASE_JSON=$(curl -fsSL "$GITHUB_API/releases/latest" 2>/dev/null) || RELEASE_JSON=""
+
+    LATEST_TAG=""
+    if [ -n "$RELEASE_JSON" ]; then
+        LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+    fi
+    if [ -z "$LATEST_TAG" ]; then
+        warn "No release found (repo may not have releases yet). Falling back to git clone..."
+        INSTALL_MODE="git"
+        git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+        success "Repository ready at $INSTALL_DIR (git fallback)"
+    else
+        LATEST_VERSION="${LATEST_TAG#v}"
+        info "Latest release: $LATEST_TAG"
+
+        # Find tarball asset
+        TARBALL_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("lobster.*\\.tar\\.gz")) | .browser_download_url' | head -1)
+        if [ -z "$TARBALL_URL" ]; then
+            TARBALL_URL=$(echo "$RELEASE_JSON" | jq -r '.tarball_url // empty')
+        fi
+
+        if [ -z "$TARBALL_URL" ]; then
+            error "No tarball found in release. Falling back to git clone..."
+            git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+            cd "$INSTALL_DIR"
+        else
+            # Download tarball
+            TMP_DIR=$(mktemp -d)
+            TARBALL_FILE="$TMP_DIR/lobster.tar.gz"
+            info "Downloading $TARBALL_URL..."
+            curl -fsSL -o "$TARBALL_FILE" "$TARBALL_URL" || {
+                error "Failed to download tarball"
+                rm -rf "$TMP_DIR"
+                exit 1
+            }
+            success "Downloaded $(du -h "$TARBALL_FILE" | cut -f1)"
+
+            # Verify checksum if available
+            CHECKSUM_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("checksums|sha256")) | .browser_download_url' | head -1)
+            if [ -n "$CHECKSUM_URL" ]; then
+                info "Verifying checksum..."
+                EXPECTED=$(curl -fsSL "$CHECKSUM_URL" 2>/dev/null | head -1 | awk '{print $1}')
+                ACTUAL=$(sha256sum "$TARBALL_FILE" | awk '{print $1}')
+                if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+                    error "Checksum mismatch!"
+                    rm -rf "$TMP_DIR"
+                    exit 1
+                fi
+                success "Checksum verified"
+            fi
+
+            # Extract
+            EXTRACT_DIR="$TMP_DIR/extracted"
+            mkdir -p "$EXTRACT_DIR"
+            tar xzf "$TARBALL_FILE" -C "$EXTRACT_DIR"
+
+            # Find extracted directory
+            NEW_INSTALL=$(find "$EXTRACT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            [ -z "$NEW_INSTALL" ] && NEW_INSTALL="$EXTRACT_DIR"
+
+            # Preserve .venv if upgrading
+            if [ -d "$INSTALL_DIR/.venv" ]; then
+                mv "$INSTALL_DIR/.venv" "$NEW_INSTALL/.venv"
+            fi
+            if [ -d "$INSTALL_DIR/.state" ]; then
+                mv "$INSTALL_DIR/.state" "$NEW_INSTALL/.state"
+            fi
+
+            # Swap
+            if [ -d "$INSTALL_DIR" ]; then
+                BACKUP="$HOME/lobster.bak"
+                [ -d "$BACKUP" ] && rm -rf "$BACKUP"
+                mv "$INSTALL_DIR" "$BACKUP"
+            fi
+            mv "$NEW_INSTALL" "$INSTALL_DIR"
+
+            # Make scripts executable
+            chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
+            chmod +x "$INSTALL_DIR/install.sh" 2>/dev/null || true
+
+            rm -rf "$TMP_DIR"
+            cd "$INSTALL_DIR"
+            success "Lobster v$LATEST_VERSION installed at $INSTALL_DIR (no .git/)"
+        fi
+    fi
+fi
 
 #===============================================================================
 # Create Directories
@@ -423,14 +702,31 @@ success "Git hooks configured (core.hooksPath -> .githooks)"
 
 step "Creating directories..."
 
-mkdir -p "$WORKSPACE_DIR/logs"
+mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
+mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
-mkdir -p "$INSTALL_DIR/scheduled-tasks"/{tasks,logs}
-mkdir -p "$PROJECTS_DIR"/{personal,business}
+mkdir -p "$CONFIG_DIR"
+mkdir -p "$PROJECTS_DIR"
+
+# Legacy: also create ~/projects/ for backward compatibility
+mkdir -p "$HOME/projects"/{personal,business}
+
+# Seed canonical templates (only files that don't already exist; skip examples)
+TEMPLATES_DIR="$INSTALL_DIR/memory/canonical-templates"
+if [ -d "$TEMPLATES_DIR" ]; then
+    for tmpl in "$TEMPLATES_DIR"/*.md; do
+        [ -f "$tmpl" ] || continue
+        base=$(basename "$tmpl")
+        dest="$WORKSPACE_DIR/memory/canonical/$base"
+        if [ ! -f "$dest" ]; then
+            cp "$tmpl" "$dest"
+            info "  Seeded canonical template: $base"
+        fi
+    done
+fi
 
 success "Directories created"
-info "  $PROJECTS_DIR/personal - Personal projects"
-info "  $PROJECTS_DIR/business - Business/work projects"
+info "  $PROJECTS_DIR - All Lobster-managed projects"
 
 #===============================================================================
 # Scheduled Tasks Setup
@@ -438,8 +734,8 @@ info "  $PROJECTS_DIR/business - Business/work projects"
 
 step "Setting up scheduled tasks infrastructure..."
 
-# Create jobs.json if it doesn't exist
-JOBS_FILE="$INSTALL_DIR/scheduled-tasks/jobs.json"
+# Create jobs.json if it doesn't exist (in workspace, not repo)
+JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
 if [ ! -f "$JOBS_FILE" ]; then
     echo '{"jobs": {}}' > "$JOBS_FILE"
 fi
@@ -462,12 +758,13 @@ if [ -z "$JOB_NAME" ]; then
     exit 1
 fi
 
-JOBS_DIR="$HOME/lobster/scheduled-tasks"
-TASK_FILE="$JOBS_DIR/tasks/${JOB_NAME}.md"
+REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
-LOG_DIR="$JOBS_DIR/logs"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-JOBS_FILE="$JOBS_DIR/jobs.json"
+JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
 
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
@@ -543,8 +840,10 @@ cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
 
 set -e
 
-JOBS_FILE="$HOME/lobster/scheduled-tasks/jobs.json"
-RUNNER="$HOME/lobster/scheduled-tasks/run-job.sh"
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
+RUNNER="$REPO_DIR/scheduled-tasks/run-job.sh"
 
 if ! command -v crontab &> /dev/null; then
     echo "Warning: crontab not found. Install cron to enable scheduled tasks."
@@ -583,9 +882,15 @@ crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
 SYNCCRON
 chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh"
 
-# Enable cron service
-sudo systemctl enable cron 2>/dev/null || true
-sudo systemctl start cron 2>/dev/null || true
+# Enable cron service (name differs by distro)
+if [ "$PKG_MANAGER" = "apt" ]; then
+    sudo systemctl enable cron 2>/dev/null || true
+    sudo systemctl start cron 2>/dev/null || true
+else
+    # Amazon Linux / Fedora uses crond
+    sudo systemctl enable crond 2>/dev/null || true
+    sudo systemctl start crond 2>/dev/null || true
+fi
 
 # Enable atd service (for self-check reminders via 'at' command)
 sudo systemctl enable atd 2>/dev/null || true
@@ -609,6 +914,21 @@ HEALTH_MARKER="# LOBSTER-HEALTH"
  echo "*/2 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
 
 success "Health monitoring configured (checks every 2 minutes)"
+
+#===============================================================================
+# Daily Dependency Health Check
+#===============================================================================
+
+step "Setting up daily dependency health check..."
+
+chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh"
+
+# Add daily health check to crontab (runs at 06:00 every day)
+DAILY_MARKER="# LOBSTER-DAILY-HEALTH"
+(crontab -l 2>/dev/null | grep -v "$DAILY_MARKER" | grep -v "daily-health-check"; \
+ echo "0 6 * * * $INSTALL_DIR/scripts/daily-health-check.sh $DAILY_MARKER") | crontab -
+
+success "Daily dependency health check configured (runs at 06:00 daily)"
 
 #===============================================================================
 # Self-Check Reminder System
@@ -656,10 +976,22 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
         info "Self-check hook already configured in Claude Code settings"
     fi
 else
-    # Create settings.json with hook
+    # Create settings.json with both hooks
     cat > "$CLAUDE_SETTINGS" << HOOKEOF
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $INSTALL_DIR/hooks/no-auto-memory.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "mcp__lobster-inbox__send_reply",
@@ -675,10 +1007,51 @@ else
   }
 }
 HOOKEOF
-    success "Claude Code settings created with self-check hook"
+    success "Claude Code settings created with hooks"
 fi
 
 success "Self-check system configured (cron every 3min + PostToolUse hook)"
+
+# Set up Claude Code PreToolUse hook to block writes to .claude/memory/
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Write|Edit")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Write|Edit",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/no-auto-memory.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "No-auto-memory hook added to Claude Code settings"
+    else
+        info "No-auto-memory hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping no-auto-memory hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to enforce clickable links for completed work
+chmod +x "$INSTALL_DIR/hooks/link-checker.py"
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "mcp__lobster-inbox__send_reply")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__send_reply",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/link-checker.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "Link enforcement hook installed"
+    else
+        info "Link enforcement hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping link enforcement hook (settings.json not yet created)"
+fi
 
 #===============================================================================
 # Python Environment
@@ -694,7 +1067,70 @@ fi
 
 source .venv/bin/activate
 pip install --quiet --upgrade pip
-pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt
+pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+success "Core Python packages installed"
+
+#-------------------------------------------------------------------------------
+# fastembed
+#-------------------------------------------------------------------------------
+info "Installing fastembed..."
+if pip install --quiet fastembed; then
+    success "fastembed installed"
+else
+    warn "fastembed install failed. Vector embedding features may be unavailable."
+fi
+
+#-------------------------------------------------------------------------------
+# sqlite-vec  (known aarch64 ELFCLASS32 bug in older releases; try alpha first)
+#-------------------------------------------------------------------------------
+info "Installing sqlite-vec..."
+SQLITE_VEC_OK=false
+
+# Try stable release first
+if pip install --quiet sqlite-vec 2>/dev/null; then
+    # Verify it actually loads (aarch64 bug produces an import error)
+    if python3 -c "import sqlite_vec" 2>/dev/null; then
+        success "sqlite-vec installed and loads correctly"
+        SQLITE_VEC_OK=true
+    else
+        warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
+        pip uninstall -y sqlite-vec 2>/dev/null || true
+    fi
+fi
+
+if [ "$SQLITE_VEC_OK" = false ]; then
+    # Try known-good alpha that contains the aarch64 fix
+    if pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
+        if python3 -c "import sqlite_vec" 2>/dev/null; then
+            success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
+            SQLITE_VEC_OK=true
+        else
+            warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
+            pip uninstall -y sqlite-vec 2>/dev/null || true
+        fi
+    fi
+fi
+
+if [ "$SQLITE_VEC_OK" = false ]; then
+    warn "Attempting to build sqlite-vec from source (last resort)..."
+    _SQLITE_VEC_SRC_DIR="$(mktemp -d)"
+    if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
+        cd "$_SQLITE_VEC_SRC_DIR"
+        if make loadable python 2>/dev/null && pip install --quiet -e . 2>/dev/null; then
+            if python3 -c "import sqlite_vec" 2>/dev/null; then
+                success "sqlite-vec built from source and loads correctly"
+                SQLITE_VEC_OK=true
+            else
+                warn "sqlite-vec source build also fails to load. Vector search will be unavailable."
+            fi
+        else
+            warn "sqlite-vec source build failed. Vector search will be unavailable."
+        fi
+        cd "$INSTALL_DIR"
+    fi
+    rm -rf "$_SQLITE_VEC_SRC_DIR"
+fi
+
 deactivate
 
 success "Python environment ready"
@@ -705,7 +1141,7 @@ success "Python environment ready"
 
 step "Configuring Lobster..."
 
-CONFIG_FILE="$INSTALL_DIR/config/config.env"
+CONFIG_FILE="$CONFIG_DIR/config.env"
 CONFIG_EXAMPLE="$INSTALL_DIR/config/config.env.example"
 
 # Check if already configured
@@ -843,6 +1279,99 @@ else
 fi
 
 #===============================================================================
+# Voice Transcription (whisper.cpp + ffmpeg)
+#
+# This is a HARD REQUIREMENT. If whisper.cpp fails to build or the model
+# fails to download, the installer will exit with an error.
+#===============================================================================
+
+step "Voice Transcription Setup (whisper.cpp)..."
+
+# Check ffmpeg - should already be installed by the system deps section above.
+# For dnf systems, ffmpeg may not be in standard repos; try to install if missing.
+if ! command -v ffmpeg &>/dev/null; then
+    warn "ffmpeg not found. Attempting to install..."
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo apt-get install -y -qq ffmpeg
+    else
+        # Amazon Linux 2023 does not ship ffmpeg in standard repos; try RPM Fusion
+        if ! sudo dnf install -y ffmpeg 2>/dev/null; then
+            error "ffmpeg installation failed."
+            error "On Amazon Linux 2023, install via RPM Fusion:"
+            error "  sudo dnf install -y https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm"
+            error "  sudo dnf install -y ffmpeg"
+            exit 1
+        fi
+    fi
+fi
+if command -v ffmpeg &>/dev/null; then
+    success "ffmpeg is available"
+else
+    error "ffmpeg is required for voice message transcription but could not be installed."
+    exit 1
+fi
+
+# Build whisper.cpp
+WHISPER_DIR="${WORKSPACE_DIR}/whisper.cpp"
+if [ ! -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
+    step "Building whisper.cpp (this may take a few minutes)..."
+    # Ensure build tools are present (already installed via system deps, but be safe)
+    if ! command -v cmake &>/dev/null; then
+        error "cmake is required to build whisper.cpp but is not installed."
+        error "Install it with: sudo apt-get install -y cmake build-essential"
+        exit 1
+    fi
+    mkdir -p "$(dirname "$WHISPER_DIR")"
+    if [ ! -d "$WHISPER_DIR" ]; then
+        info "Cloning whisper.cpp..."
+        git clone --quiet https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+    fi
+    cd "$WHISPER_DIR"
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON 2>&1 | tail -5
+    cmake --build build -j"$(nproc)" 2>&1 | tail -10
+    cd "$INSTALL_DIR"
+    if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
+        success "whisper.cpp built successfully"
+    else
+        error "whisper.cpp build failed. Voice transcription is a hard requirement."
+        error "Check build output above and ensure build-essential/cmake/gcc are installed."
+        exit 1
+    fi
+else
+    success "whisper.cpp already built"
+fi
+
+# Download whisper small model (~465MB)
+if [ ! -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+    step "Downloading whisper small model (~465MB)..."
+    if [ -f "$WHISPER_DIR/models/download-ggml-model.sh" ]; then
+        bash "$WHISPER_DIR/models/download-ggml-model.sh" small
+        if [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+            success "Whisper small model downloaded"
+        else
+            error "Whisper model download failed."
+            error "Try manually: bash $WHISPER_DIR/models/download-ggml-model.sh small"
+            exit 1
+        fi
+    else
+        error "Whisper model download script not found at $WHISPER_DIR/models/download-ggml-model.sh"
+        error "Ensure whisper.cpp was cloned correctly."
+        exit 1
+    fi
+else
+    success "Whisper small model already present"
+fi
+
+# Verify the full pipeline works
+info "Verifying whisper.cpp transcription pipeline..."
+if "$WHISPER_DIR/build/bin/whisper-cli" --help &>/dev/null 2>&1; then
+    success "whisper-cli binary verified"
+else
+    error "whisper-cli binary does not execute correctly."
+    exit 1
+fi
+
+#===============================================================================
 # Authentication Method (OAuth-first)
 #===============================================================================
 
@@ -976,19 +1505,13 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
     fi
 fi
 
-# --- Select the correct Claude wrapper based on auth method ---
-if [ "$AUTH_METHOD" = "oauth" ]; then
-    info "OAuth mode: using claude-wrapper.exp (interactive mode)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.exp"
-elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    info "API key mode: using claude-wrapper.sh (--print polling mode)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.sh"
-    chmod +x "$INSTALL_DIR/scripts/claude-wrapper.sh"
-else
-    # Shouldn't reach here, but default to interactive
-    info "Using claude-wrapper.exp (interactive mode)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.exp"
-fi
+# --- Select the Claude launcher ---
+# The persistent launcher (claude-persistent.sh) replaces the old polling
+# wrappers. It runs Claude in a persistent session with wait_for_messages()
+# and handles lifecycle (restart, hibernate, backoff) internally.
+info "Using persistent lifecycle launcher: claude-persistent.sh"
+CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
+chmod +x "$CLAUDE_WRAPPER"
 
 success "Claude wrapper: $CLAUDE_WRAPPER"
 
@@ -1039,6 +1562,14 @@ if [ -f "$MCP_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-mcp.service"
 fi
 
+# Generate observability server service if template exists
+OBSERVABILITY_TEMPLATE="$INSTALL_DIR/services/lobster-observability.service.template"
+if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
+    generate_from_template \
+        "$OBSERVABILITY_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-observability.service"
+fi
+
 #===============================================================================
 # Install Services
 #===============================================================================
@@ -1058,6 +1589,12 @@ fi
 if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
     sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
     info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+fi
+
+# Install observability service if generated
+if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
+    sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
+    info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
 fi
 
 sudo systemctl daemon-reload
@@ -1160,6 +1697,15 @@ You are a **dispatcher**, not a worker. Stay responsive to incoming messages.
 - `check_task_outputs(since?, limit?, job_name?)` - Check job outputs
 - `write_task_output(job_name, output, status?)` - Write job output
 
+## Project Directory Convention
+
+All Lobster-managed projects live in \`\$LOBSTER_WORKSPACE/projects/[project-name]/\`.
+
+- **Clone repos here**, not in \`~/projects/\` or elsewhere
+- The \`projects/\` directory is created automatically during install
+- Environment variable: \`\$LOBSTER_PROJECTS\` (defaults to \`\$LOBSTER_WORKSPACE/projects\`)
+- This is a system property, not a suggestion -- all project work goes here
+
 ## Behavior Guidelines
 
 - Be concise (users are on mobile)
@@ -1213,6 +1759,22 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     else
         warn "Claude session: not running (check with: lobster attach)"
     fi
+
+    # Start dashboard server if not already running
+    DASHBOARD_CMD="$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/src/dashboard/server.py --host 0.0.0.0 --port 9100"
+    if ss -tlnp | grep -q 9100; then
+        success "Dashboard server: already running on port 9100"
+    else
+        info "Starting dashboard server..."
+        mkdir -p "$WORKSPACE_DIR/logs"
+        nohup $DASHBOARD_CMD >> "$WORKSPACE_DIR/logs/dashboard-server.log" 2>&1 &
+        sleep 2
+        if ss -tlnp | grep -q 9100; then
+            success "Dashboard server: running on port 9100"
+        else
+            warn "Dashboard server: failed to start (check $WORKSPACE_DIR/logs/dashboard-server.log)"
+        fi
+    fi
 else
     info "Services not started. Start manually with: lobster start"
 fi
@@ -1243,7 +1805,15 @@ echo "  lobster stop      Stop all services"
 echo "  lobster help      Show all commands"
 echo ""
 echo -e "${BOLD}Directories:${NC}"
-echo "  $INSTALL_DIR        Repository"
+echo "  $INSTALL_DIR        Lobster code"
+echo "  $CONFIG_DIR          Configuration"
 echo "  $WORKSPACE_DIR      Claude workspace"
+echo "  $PROJECTS_DIR  Projects"
 echo "  $MESSAGES_DIR       Message queues"
+echo ""
+if [ "$INSTALL_MODE" = "tarball" ]; then
+    echo -e "${BOLD}Install mode:${NC} tarball (upgrade with: lobster upgrade)"
+else
+    echo -e "${BOLD}Install mode:${NC} git (upgrade with: git pull or lobster upgrade)"
+fi
 echo ""
