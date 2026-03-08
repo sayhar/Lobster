@@ -1547,22 +1547,21 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         read -p "Press Enter to continue..."
         echo ""
 
-        # Always use auth login — it works on headless servers too (shows a URL
-        # to open in any browser). Unlike setup-token, auth login persists
-        # credentials to ~/.claude/.credentials.json with a refresh token.
-        if claude auth login; then
-            # Verify credentials were persisted (warn but don't block if check fails)
-            sleep 1
-            if claude auth status &>/dev/null 2>&1; then
-                success "Authentication successful (verified)!"
-            else
-                warn "Auth login succeeded but credentials may not have persisted."
-                warn "If Lobster can't authenticate later, run: claude auth login"
-            fi
+        # Launch claude interactively — it triggers OAuth on first run.
+        # claude auth login can hang after browser auth completes, so we
+        # use the normal interactive flow instead, then verify with auth status.
+        echo "Launching Claude Code for first-time authentication..."
+        echo "Complete the OAuth flow, then type /exit to return to the installer."
+        echo ""
+        claude
+
+        # Verify credentials were persisted
+        sleep 1
+        if claude auth status &>/dev/null 2>&1; then
+            success "Authentication successful (verified)!"
         else
-            warn "OAuth authentication failed or was cancelled."
-            echo ""
-            echo "Falling back to API key..."
+            warn "Could not verify authentication."
+            warn "If Lobster can't authenticate later, try running: claude"
             AUTH_METHOD="apikey_fallback"
         fi
     fi
@@ -2010,6 +2009,12 @@ if [ "$NON_INTERACTIVE" = true ]; then
     echo "  bash $INSTALL_DIR/install.sh"
     echo ""
 fi
+echo ""
+echo -e "${YELLOW}${BOLD}IMPORTANT:${NC} If 'claude' or 'lobster' commands are not found, run:"
+echo ""
+echo -e "  ${BOLD}source ~/.bashrc${NC}"
+echo ""
+echo "This loads the updated PATH into your current terminal session."
 echo ""
 echo -e "${YELLOW}${BOLD}IMPORTANT:${NC} If 'claude' or 'lobster' commands are not found, run:"
 echo ""
