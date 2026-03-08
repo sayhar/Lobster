@@ -309,8 +309,8 @@ else
     success "dnf-based system detected (Amazon Linux 2023 / Fedora)"
 fi
 
-# Check if running interactively
-if [ ! -t 0 ]; then
+# Check if running interactively (skip in non-interactive mode)
+if [ ! -t 0 ] && [ "$NON_INTERACTIVE" = false ]; then
     error "This script requires interactive input."
     echo ""
     echo "Please run it like this instead:"
