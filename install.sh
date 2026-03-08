@@ -1497,15 +1497,10 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         read -p "Press Enter to continue..."
         echo ""
 
-        # Use setup-token on headless, auth login otherwise
-        AUTH_CMD="claude auth login"
-        if [ "$IS_HEADLESS" = true ]; then
-            AUTH_CMD="claude setup-token"
-        fi
-
-        if $AUTH_CMD; then
-            # Trust the exit code — setup-token and auth login store tokens
-            # differently, so auth status may not recognize setup-token tokens
+        # Always use auth login — it works on headless servers too (shows a URL
+        # to open in any browser). Unlike setup-token, auth login persists
+        # credentials to ~/.claude/.credentials.json with a refresh token.
+        if claude auth login; then
             success "Authentication successful!"
         else
             warn "OAuth authentication failed or was cancelled."
