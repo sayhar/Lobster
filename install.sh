@@ -374,7 +374,15 @@ step "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     sudo apt-get update -qq
-    sudo apt-get upgrade -y -qq
+    # Only run full upgrade on first install; skip on re-runs to save time.
+    _UPGRADE_MARKER="$INSTALL_DIR/.state/apt-upgrade-done"
+    if [ ! -f "$_UPGRADE_MARKER" ]; then
+        sudo apt-get upgrade -y -qq
+        mkdir -p "$(dirname "$_UPGRADE_MARKER")"
+        touch "$_UPGRADE_MARKER"
+    else
+        info "Skipping apt upgrade (already done; delete $_UPGRADE_MARKER to force)"
+    fi
 
     PACKAGES=(
         curl
@@ -627,8 +635,13 @@ else
     if [ -z "$LATEST_TAG" ]; then
         warn "No release found (repo may not have releases yet). Falling back to git clone..."
         INSTALL_MODE="git"
-        git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
-        cd "$INSTALL_DIR"
+        if [ -d "$INSTALL_DIR/.git" ]; then
+            cd "$INSTALL_DIR"
+            git pull --quiet origin "$REPO_BRANCH"
+        else
+            git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+            cd "$INSTALL_DIR"
+        fi
         success "Repository ready at $INSTALL_DIR (git fallback)"
     else
         LATEST_VERSION="${LATEST_TAG#v}"
@@ -642,8 +655,13 @@ else
 
         if [ -z "$TARBALL_URL" ]; then
             error "No tarball found in release. Falling back to git clone..."
-            git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
-            cd "$INSTALL_DIR"
+            if [ -d "$INSTALL_DIR/.git" ]; then
+                cd "$INSTALL_DIR"
+                git pull --quiet origin "$REPO_BRANCH"
+            else
+                git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+                cd "$INSTALL_DIR"
+            fi
         else
             # Download tarball
             TMP_DIR=$(mktemp -d)
@@ -750,7 +768,7 @@ if [ ! -f "$JOBS_FILE" ]; then
     echo '{"jobs": {}}' > "$JOBS_FILE"
 fi
 
-# Create run-job.sh
+# Create run-job.sh (overwrite is safe — this is managed by the installer, not user-editable)
 cat > "$INSTALL_DIR/scheduled-tasks/run-job.sh" << 'RUNJOB'
 #!/bin/bash
 # Lobster Scheduled Task Executor
@@ -1076,69 +1094,89 @@ if [ ! -d ".venv" ]; then
 fi
 
 source .venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
-success "Core Python packages installed"
 
-#-------------------------------------------------------------------------------
-# fastembed
-#-------------------------------------------------------------------------------
-info "Installing fastembed..."
-if pip install --quiet fastembed; then
-    success "fastembed installed"
+# Use a marker to avoid re-running pip installs every time.
+# Delete the marker to force a full reinstall.
+_PIP_MARKER="$INSTALL_DIR/.state/pip-deps-installed"
+_NEED_PIP=false
+if [ ! -f "$_PIP_MARKER" ]; then
+    _NEED_PIP=true
 else
-    warn "fastembed install failed. Vector embedding features may be unavailable."
-fi
-
-#-------------------------------------------------------------------------------
-# sqlite-vec  (known aarch64 ELFCLASS32 bug in older releases; try alpha first)
-#-------------------------------------------------------------------------------
-info "Installing sqlite-vec..."
-SQLITE_VEC_OK=false
-
-# Try stable release first
-if pip install --quiet sqlite-vec 2>/dev/null; then
-    # Verify it actually loads (aarch64 bug produces an import error)
-    if python3 -c "import sqlite_vec" 2>/dev/null; then
-        success "sqlite-vec installed and loads correctly"
-        SQLITE_VEC_OK=true
-    else
-        warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
-        pip uninstall -y sqlite-vec 2>/dev/null || true
+    # Quick sanity: verify core package is importable
+    if ! python3 -c "import mcp" 2>/dev/null; then
+        _NEED_PIP=true
+        info "Core package missing; re-installing Python deps..."
     fi
 fi
 
-if [ "$SQLITE_VEC_OK" = false ]; then
-    # Try known-good alpha that contains the aarch64 fix
-    if pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
+if [ "$_NEED_PIP" = true ]; then
+    pip install --quiet --upgrade pip
+    pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+    success "Core Python packages installed"
+
+    #---------------------------------------------------------------------------
+    # fastembed
+    #---------------------------------------------------------------------------
+    info "Installing fastembed..."
+    if pip install --quiet fastembed; then
+        success "fastembed installed"
+    else
+        warn "fastembed install failed. Vector embedding features may be unavailable."
+    fi
+
+    #---------------------------------------------------------------------------
+    # sqlite-vec  (known aarch64 ELFCLASS32 bug in older releases; try alpha first)
+    #---------------------------------------------------------------------------
+    info "Installing sqlite-vec..."
+    SQLITE_VEC_OK=false
+
+    # Try stable release first
+    if pip install --quiet sqlite-vec 2>/dev/null; then
         if python3 -c "import sqlite_vec" 2>/dev/null; then
-            success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
+            success "sqlite-vec installed and loads correctly"
             SQLITE_VEC_OK=true
         else
-            warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
+            warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
             pip uninstall -y sqlite-vec 2>/dev/null || true
         fi
     fi
-fi
 
-if [ "$SQLITE_VEC_OK" = false ]; then
-    warn "Attempting to build sqlite-vec from source (last resort)..."
-    _SQLITE_VEC_SRC_DIR="$(mktemp -d)"
-    if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
-        cd "$_SQLITE_VEC_SRC_DIR"
-        if make loadable python 2>/dev/null && pip install --quiet -e . 2>/dev/null; then
+    if [ "$SQLITE_VEC_OK" = false ]; then
+        if pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
             if python3 -c "import sqlite_vec" 2>/dev/null; then
-                success "sqlite-vec built from source and loads correctly"
+                success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
                 SQLITE_VEC_OK=true
             else
-                warn "sqlite-vec source build also fails to load. Vector search will be unavailable."
+                warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
+                pip uninstall -y sqlite-vec 2>/dev/null || true
             fi
-        else
-            warn "sqlite-vec source build failed. Vector search will be unavailable."
         fi
-        cd "$INSTALL_DIR"
     fi
-    rm -rf "$_SQLITE_VEC_SRC_DIR"
+
+    if [ "$SQLITE_VEC_OK" = false ]; then
+        warn "Attempting to build sqlite-vec from source (last resort)..."
+        _SQLITE_VEC_SRC_DIR="$(mktemp -d)"
+        if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
+            cd "$_SQLITE_VEC_SRC_DIR"
+            if make loadable python 2>/dev/null && pip install --quiet -e . 2>/dev/null; then
+                if python3 -c "import sqlite_vec" 2>/dev/null; then
+                    success "sqlite-vec built from source and loads correctly"
+                    SQLITE_VEC_OK=true
+                else
+                    warn "sqlite-vec source build also fails to load. Vector search will be unavailable."
+                fi
+            else
+                warn "sqlite-vec source build failed. Vector search will be unavailable."
+            fi
+            cd "$INSTALL_DIR"
+        fi
+        rm -rf "$_SQLITE_VEC_SRC_DIR"
+    fi
+
+    mkdir -p "$(dirname "$_PIP_MARKER")"
+    touch "$_PIP_MARKER"
+else
+    success "Python packages already installed (skipping; delete $_PIP_MARKER to force)"
 fi
 
 deactivate
@@ -1302,8 +1340,8 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
             claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
             success "GitHub MCP server configured"
 
-            # Save PAT to config (optional, for reference)
-            if [ -f "$CONFIG_FILE" ]; then
+            # Save PAT to config (optional, for reference; avoid duplicates)
+            if [ -f "$CONFIG_FILE" ] && ! grep -q "^GITHUB_PAT_CONFIGURED=" "$CONFIG_FILE" 2>/dev/null; then
                 echo "" >> "$CONFIG_FILE"
                 echo "# GitHub Integration" >> "$CONFIG_FILE"
                 echo "GITHUB_PAT_CONFIGURED=true" >> "$CONFIG_FILE"
@@ -1543,11 +1581,13 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
             fi
         done
 
-        # Save API key to config.env if we got one
+        # Save API key to config.env if we got one (avoid duplicates)
         if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -f "$CONFIG_FILE" ]; then
-            echo "" >> "$CONFIG_FILE"
-            echo "# Anthropic API Key (per-token billing)" >> "$CONFIG_FILE"
-            echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> "$CONFIG_FILE"
+            if ! grep -q "^ANTHROPIC_API_KEY=" "$CONFIG_FILE" 2>/dev/null; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Anthropic API Key (per-token billing)" >> "$CONFIG_FILE"
+                echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> "$CONFIG_FILE"
+            fi
         fi
     fi
 fi
@@ -1623,30 +1663,46 @@ fi
 
 step "Installing systemd services..."
 
-sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
-sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
+_SERVICES_CHANGED=false
+
+# Helper: copy service file only if changed
+_install_service() {
+    local src="$1"
+    local dest="/etc/systemd/system/$(basename "$src")"
+    if [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+        sudo cp "$src" "$dest"
+        _SERVICES_CHANGED=true
+        success "Installed: $(basename "$src")"
+    else
+        info "Unchanged: $(basename "$src")"
+    fi
+}
+
+_install_service "$INSTALL_DIR/services/lobster-router.service"
+_install_service "$INSTALL_DIR/services/lobster-claude.service"
 
 # Install Slack router service if generated
 if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
-    info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
+    _install_service "$INSTALL_DIR/services/lobster-slack-router.service"
 fi
 
 # Install MCP HTTP bridge service if generated
 if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
-    info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+    _install_service "$INSTALL_DIR/services/lobster-mcp.service"
 fi
 
 # Install observability service if generated
 if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
-    info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
+    _install_service "$INSTALL_DIR/services/lobster-observability.service"
 fi
 
-sudo systemctl daemon-reload
-
-success "Services installed"
+# Only reload systemd if something changed
+if [ "$_SERVICES_CHANGED" = true ]; then
+    sudo systemctl daemon-reload
+    success "Services installed and systemd reloaded"
+else
+    success "Services already up to date (skipping daemon-reload)"
+fi
 
 #===============================================================================
 # Register MCP Server
@@ -1654,15 +1710,22 @@ success "Services installed"
 
 step "Registering MCP server with Claude..."
 
-# Remove existing registration if present
-claude mcp remove lobster-inbox 2>/dev/null || true
-
-# Add new registration
+# Register MCP server (idempotent: only update if not already registered with correct args)
 PYTHON_PATH="$INSTALL_DIR/.venv/bin/python"
-if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
-    success "MCP server registered"
+_MCP_REGISTERED=false
+if claude mcp list 2>/dev/null | grep -q "lobster-inbox"; then
+    _MCP_REGISTERED=true
+fi
+
+if [ "$_MCP_REGISTERED" = true ]; then
+    success "MCP server already registered (lobster-inbox)"
 else
-    warn "MCP server registration may have failed. Check with: claude mcp list"
+    claude mcp remove lobster-inbox 2>/dev/null || true
+    if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
+        success "MCP server registered"
+    else
+        warn "MCP server registration may have failed. Check with: claude mcp list"
+    fi
 fi
 
 #===============================================================================
@@ -1671,12 +1734,14 @@ fi
 
 step "Installing lobster CLI..."
 
-# Remove any existing symlink or file
-sudo rm -f /usr/local/bin/lobster
-sudo cp "$INSTALL_DIR/src/cli" /usr/local/bin/lobster
-sudo chmod +x /usr/local/bin/lobster
-
-success "CLI installed"
+# Only update if the CLI has changed (or doesn't exist yet)
+if [ ! -f /usr/local/bin/lobster ] || ! cmp -s "$INSTALL_DIR/src/cli" /usr/local/bin/lobster; then
+    sudo cp "$INSTALL_DIR/src/cli" /usr/local/bin/lobster
+    sudo chmod +x /usr/local/bin/lobster
+    success "CLI installed"
+else
+    success "CLI already up to date"
+fi
 
 #===============================================================================
 # Create Workspace Context
@@ -1684,6 +1749,11 @@ success "CLI installed"
 
 step "Creating workspace context..."
 
+# Only create CLAUDE.md if it doesn't exist yet.
+# On re-runs, the private overlay (or user edits) should be preserved.
+if [ -f "$WORKSPACE_DIR/CLAUDE.md" ]; then
+    info "CLAUDE.md already exists; preserving existing version"
+else
 cat > "$WORKSPACE_DIR/CLAUDE.md" << 'EOF'
 # Lobster System Context
 
@@ -1761,8 +1831,9 @@ All Lobster-managed projects live in \`\$LOBSTER_WORKSPACE/projects/[project-nam
 - Return to wait_for_messages() within 30 seconds
 - Use functional-engineer agent for GitHub issue work
 EOF
+fi
 
-success "Workspace context created"
+success "Workspace context ready"
 
 #===============================================================================
 # Apply Private Configuration Overlay
@@ -1793,11 +1864,18 @@ fi
 
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     sudo systemctl enable lobster-router lobster-claude
-    sudo systemctl start lobster-router
-    sleep 2
-    sudo systemctl start lobster-claude
 
-    sleep 3
+    # Only start services that aren't already running
+    if ! systemctl is-active --quiet lobster-router; then
+        sudo systemctl start lobster-router
+        sleep 2
+    fi
+    if ! systemctl is-active --quiet lobster-claude; then
+        sudo systemctl start lobster-claude
+        sleep 3
+    else
+        sleep 1
+    fi
 
     echo ""
     if systemctl is-active --quiet lobster-router; then
