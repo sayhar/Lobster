@@ -15,6 +15,10 @@
 
 set -e
 
+# Suppress needrestart interactive prompts on Ubuntu/Debian
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,9 +37,11 @@ step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Parse install mode from arguments
 DEV_MODE=false
+NON_INTERACTIVE=false
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=true ;;
+        --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
     esac
 done
 
@@ -303,34 +309,27 @@ else
     success "dnf-based system detected (Amazon Linux 2023 / Fedora)"
 fi
 
-# Smart root handling: create a lobster user and re-exec as them
+# Check if running interactively (skip in non-interactive mode)
+# Smart root handling: if running as root, create lobster user and re-exec
 if [ "$(id -u)" = "0" ]; then
-    warn "Running as root — will create a 'lobster' user and re-exec as them."
+    info "Running as root — creating lobster user and switching..."
     if ! id lobster &>/dev/null; then
-        info "Creating 'lobster' user with passwordless sudo..."
         useradd -m -s /bin/bash lobster
         echo "lobster ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lobster
-        chmod 0440 /etc/sudoers.d/lobster
-        # Copy SSH authorized_keys so user can SSH in directly next time
-        if [ -f /root/.ssh/authorized_keys ]; then
-            mkdir -p /home/lobster/.ssh
-            cp /root/.ssh/authorized_keys /home/lobster/.ssh/authorized_keys
-            chown -R lobster:lobster /home/lobster/.ssh
-            chmod 700 /home/lobster/.ssh
-            chmod 600 /home/lobster/.ssh/authorized_keys
-        fi
-        success "User 'lobster' created."
-    else
-        success "User 'lobster' already exists."
+        chmod 440 /etc/sudoers.d/lobster
     fi
-    echo ""
-    info "Next time, SSH directly as: lobster@$(hostname)"
-    echo ""
+    if [ -f /root/.ssh/authorized_keys ]; then
+        mkdir -p /home/lobster/.ssh
+        cp /root/.ssh/authorized_keys /home/lobster/.ssh/
+        chown -R lobster:lobster /home/lobster/.ssh
+        chmod 700 /home/lobster/.ssh
+        chmod 600 /home/lobster/.ssh/authorized_keys
+    fi
+    warn "Next time, SSH directly as: lobster@$(hostname)"
     exec sudo -u lobster bash "$0" "$@"
 fi
 
-# Check if running interactively
-if [ ! -t 0 ]; then
+if [ ! -t 0 ] && [ "$NON_INTERACTIVE" = false ]; then
     error "This script requires interactive input."
     echo ""
     echo "Please run it like this instead:"
@@ -362,12 +361,18 @@ if ! command -v python3 &>/dev/null; then
     NEED_PYTHON=true
 else
     PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    PYTHON_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
-    if [[ "$PYTHON_MINOR" -lt 9 ]]; then
+    PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+    PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+    if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 9 ]; }; then
         warn "Python $PYTHON_VERSION found, but 3.9+ recommended"
     else
         success "Python $PYTHON_VERSION found"
     fi
+fi
+
+# Ensure ~/.local/bin is on PATH early (Claude Code installs there)
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
 fi
 
 # Check Claude Code
@@ -387,12 +392,22 @@ step "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     sudo apt-get update -qq
+    sudo apt-get upgrade -y -qq
+
+    # Install GitHub CLI (gh) repository
+    if ! dpkg -s gh &>/dev/null; then
+        info "Adding GitHub CLI apt repository..."
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+        sudo apt-get update -qq
+    fi
 
     PACKAGES=(
         curl
         wget
         git
         jq
+        gh
         python3
         python3-pip
         python3-venv
@@ -422,6 +437,7 @@ else
         wget
         git
         jq
+        gh
         python3
         python3-pip
         cronie
@@ -536,7 +552,7 @@ if [ "$PKG_MANAGER" = "dnf" ]; then
     # Ensure ~/.local/bin is on PATH for this session and future shells
     if [[ ":$PATH:" != *":$TOOLS_BIN_DIR:"* ]]; then
         export PATH="$TOOLS_BIN_DIR:$PATH"
-        for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc"; do
             if [ -f "$rc" ] && ! grep -q "$TOOLS_BIN_DIR" "$rc"; then
                 echo "export PATH=\"$TOOLS_BIN_DIR:\$PATH\"" >> "$rc"
             fi
@@ -560,7 +576,9 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
 
     # Persist ~/.local/bin to PATH in shell config files
     PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
-    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc"; do
+        # Create the file if it doesn't exist (ensures PATH is set for all shells)
+        touch "$rc" 2>/dev/null || true
         if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
             echo "" >> "$rc"
             echo "# Added by Lobster installer" >> "$rc"
@@ -568,6 +586,8 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
             info "Added ~/.local/bin to PATH in $rc"
         fi
     done
+    # Source bashrc for current session
+    [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null || true
 
     if command -v claude &>/dev/null; then
         success "Claude Code installed"
@@ -582,16 +602,10 @@ step "Checking existing Claude Code authentication..."
 
 EXISTING_OAUTH=false
 if claude auth status &>/dev/null 2>&1; then
-    # auth status only checks if credentials exist, not if they're valid.
-    # Verify the token actually works by making a real API call.
-    info "Credentials found, verifying token is still valid..."
-    if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-        success "Claude Code authenticated via OAuth (token verified)"
-        EXISTING_OAUTH=true
-    else
-        warn "OAuth credentials exist but token is expired or invalid."
-        warn "You'll need to re-authenticate during the auth setup step."
-    fi
+    # auth status reports whether credentials exist. Trust it — don't run
+    # verification commands like `claude --print` which can fail spuriously.
+    success "Claude Code authenticated (credentials found)"
+    EXISTING_OAUTH=true
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     success "ANTHROPIC_API_KEY found in environment"
 fi
@@ -1093,20 +1107,41 @@ step "Setting up Python environment..."
 
 cd "$INSTALL_DIR"
 
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+# Install uv if not present
+if ! command -v uv &>/dev/null; then
+    info "Installing uv (Python package manager)..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    if command -v uv &>/dev/null; then
+        success "uv installed"
+    else
+        error "uv installation failed"
+        exit 1
+    fi
+else
+    success "uv already installed"
 fi
 
-source .venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+if [ ! -d ".venv" ] || [ ! -f ".venv/bin/python" ]; then
+    info "Creating Python virtual environment..."
+    uv venv .venv
+else
+    success "Python venv already exists"
+fi
+
+# Activate venv for uv pip commands
+export VIRTUAL_ENV="$INSTALL_DIR/.venv"
+export PATH="$INSTALL_DIR/.venv/bin:$PATH"
+
+uv pip install --quiet --upgrade pip
+uv pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
 success "Core Python packages installed"
 
 #-------------------------------------------------------------------------------
 # fastembed
 #-------------------------------------------------------------------------------
 info "Installing fastembed..."
-if pip install --quiet fastembed; then
+if uv pip install --quiet fastembed; then
     success "fastembed installed"
 else
     warn "fastembed install failed. Vector embedding features may be unavailable."
@@ -1119,26 +1154,26 @@ info "Installing sqlite-vec..."
 SQLITE_VEC_OK=false
 
 # Try stable release first
-if pip install --quiet sqlite-vec 2>/dev/null; then
+if uv pip install --quiet sqlite-vec 2>/dev/null; then
     # Verify it actually loads (aarch64 bug produces an import error)
-    if python3 -c "import sqlite_vec" 2>/dev/null; then
+    if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
         success "sqlite-vec installed and loads correctly"
         SQLITE_VEC_OK=true
     else
         warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
-        pip uninstall -y sqlite-vec 2>/dev/null || true
+        uv pip uninstall sqlite-vec 2>/dev/null || true
     fi
 fi
 
 if [ "$SQLITE_VEC_OK" = false ]; then
     # Try known-good alpha that contains the aarch64 fix
-    if pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
-        if python3 -c "import sqlite_vec" 2>/dev/null; then
+    if uv pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
+        if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
             success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
             SQLITE_VEC_OK=true
         else
             warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
-            pip uninstall -y sqlite-vec 2>/dev/null || true
+            uv pip uninstall sqlite-vec 2>/dev/null || true
         fi
     fi
 fi
@@ -1148,8 +1183,8 @@ if [ "$SQLITE_VEC_OK" = false ]; then
     _SQLITE_VEC_SRC_DIR="$(mktemp -d)"
     if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
         cd "$_SQLITE_VEC_SRC_DIR"
-        if make loadable python 2>/dev/null && pip install --quiet -e . 2>/dev/null; then
-            if python3 -c "import sqlite_vec" 2>/dev/null; then
+        if make loadable python 2>/dev/null && uv pip install --quiet -e . 2>/dev/null; then
+            if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
                 success "sqlite-vec built from source and loads correctly"
                 SQLITE_VEC_OK=true
             else
@@ -1163,7 +1198,8 @@ if [ "$SQLITE_VEC_OK" = false ]; then
     rm -rf "$_SQLITE_VEC_SRC_DIR"
 fi
 
-deactivate
+# Unset VIRTUAL_ENV — we don't need the venv active for the rest of the script
+unset VIRTUAL_ENV
 
 success "Python environment ready"
 
@@ -1181,23 +1217,42 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
     if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ "$TELEGRAM_BOT_TOKEN" != "your_bot_token_here" ]; then
         info "Existing configuration found"
-        echo ""
-        echo "Current config:"
-        echo "  Bot Token: ${TELEGRAM_BOT_TOKEN:0:10}...${TELEGRAM_BOT_TOKEN: -5}"
-        echo "  Allowed Users: $TELEGRAM_ALLOWED_USERS"
-        echo ""
-        read -p "Keep existing configuration? [Y/n] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Nn]$ ]]; then
-            NEED_CONFIG=true
-        else
-            NEED_CONFIG=false
+        NEED_CONFIG=false
+        if [ "$NON_INTERACTIVE" = false ]; then
+            echo ""
+            echo "Current config:"
+            echo "  Bot Token: ${TELEGRAM_BOT_TOKEN:0:10}...${TELEGRAM_BOT_TOKEN: -5}"
+            echo "  Allowed Users: $TELEGRAM_ALLOWED_USERS"
+            echo ""
+            read -p "Keep existing configuration? [Y/n] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                NEED_CONFIG=true
+            fi
         fi
     else
         NEED_CONFIG=true
     fi
 else
     NEED_CONFIG=true
+fi
+
+if [ "$NEED_CONFIG" = true ] && [ "$NON_INTERACTIVE" = true ]; then
+    warn "Skipping Telegram configuration (non-interactive mode)."
+    info "Run the installer again without --non-interactive to configure Telegram."
+    # Write a placeholder config so downstream steps don't fail
+    if [ ! -f "$CONFIG_FILE" ]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        cat > "$CONFIG_FILE" << EOF
+# Lobster Configuration
+# Generated by installer on $(date) (non-interactive - needs configuration)
+
+# Telegram Bot (UNCONFIGURED - run installer interactively to set up)
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_ALLOWED_USERS=
+EOF
+    fi
+    NEED_CONFIG=false
 fi
 
 if [ "$NEED_CONFIG" = true ]; then
@@ -1261,6 +1316,28 @@ fi
 
 step "GitHub Integration (Optional)..."
 
+# Check if GitHub MCP is already configured
+GITHUB_MCP_CONFIGURED=false
+if command -v claude &>/dev/null && claude mcp list 2>/dev/null | grep -q "github"; then
+    GITHUB_MCP_CONFIGURED=true
+    success "GitHub MCP server already configured"
+fi
+
+if [ "$GITHUB_MCP_CONFIGURED" = true ]; then
+    : # Already configured, skip
+elif [ "$NON_INTERACTIVE" = true ]; then
+    info "Skipping GitHub integration (non-interactive mode)."
+elif [ -n "${GITHUB_PAT:-}" ]; then
+    # PAT available from config.env — auto-configure
+    info "Using GITHUB_PAT from config to set up GitHub MCP server..."
+    if command -v claude &>/dev/null; then
+        claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
+        success "GitHub MCP server configured"
+    else
+        warn "Claude Code not found. Configure GitHub MCP manually after install."
+    fi
+elif true; then
+
 echo ""
 echo -e "${BOLD}GitHub MCP Server Setup${NC}"
 echo ""
@@ -1309,6 +1386,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
 else
     info "Skipped GitHub integration. You can set it up later - see README.md"
 fi
+fi  # end non-interactive guard for GitHub integration
 
 #===============================================================================
 # Voice Transcription (whisper.cpp + ffmpeg)
@@ -1419,6 +1497,10 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     # API key was provided via environment variable before install started
     AUTH_METHOD="apikey"
     success "Using ANTHROPIC_API_KEY from environment"
+elif [ "$NON_INTERACTIVE" = true ]; then
+    warn "Skipping Claude authentication (non-interactive mode)."
+    info "Run the installer again without --non-interactive to configure authentication."
+    AUTH_METHOD="skipped"
 else
     # Ask the user which auth method they prefer
     echo ""
@@ -1461,13 +1543,12 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         IS_HEADLESS=true
         echo -e "${YELLOW}Headless server detected (no display).${NC}"
         echo ""
-        echo "For headless authentication, we recommend using 'claude setup-token'."
-        echo "It will display a URL — open it in any browser (phone, laptop, etc.),"
-        echo "authorize, then paste the code back here when prompted."
+        echo "'claude setup-token' will display a URL — open it in any browser"
+        echo "(phone, laptop, etc.), authorize, then paste the code back here."
         echo ""
         echo -e "Alternatively, you can use an ${BOLD}API key${NC} instead (billed per-token)."
         echo ""
-        echo "  1) Try setup-token (OAuth via URL + code paste)"
+        echo "  1) Use setup-token (OAuth via URL + code paste, recommended)"
         echo "  2) Use an API key instead"
         echo ""
         read -p "Choose [1/2]: " HEADLESS_CHOICE
@@ -1484,28 +1565,62 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         read -p "Press Enter to continue..."
         echo ""
 
-        # Use setup-token on headless, auth login otherwise
-        AUTH_CMD="claude auth login"
         if [ "$IS_HEADLESS" = true ]; then
-            AUTH_CMD="claude setup-token"
-        fi
+            # On headless servers, 'claude auth login' hangs after browser auth.
+            # Use 'claude setup-token' which works interactively in the terminal.
+            # setup-token may not persist the token to disk, so we capture output
+            # and save it to config.env if needed.
+            echo "Running 'claude setup-token' for headless authentication..."
+            echo ""
+            SETUP_OUTPUT=$(claude setup-token 2>&1 | tee /dev/tty)
 
-        if $AUTH_CMD; then
-            # Verify the auth actually works (not just that credentials exist)
-            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                success "OAuth authentication successful (verified)!"
+            sleep 1
+            if claude auth status &>/dev/null 2>&1; then
+                success "Authentication successful (verified)!"
             else
-                warn "Auth command completed but API verification failed."
-                warn "The token may have expired or the code exchange didn't complete."
-                echo ""
-                echo "Falling back to API key..."
-                AUTH_METHOD="apikey_fallback"
+                # Token wasn't persisted — try to extract it from output and save
+                # setup-token may output the token directly or in a known format
+                EXTRACTED_TOKEN=$(echo "$SETUP_OUTPUT" | grep -oP '(?<=token: |Token: |TOKEN=).*' | head -1 || true)
+                if [ -z "$EXTRACTED_TOKEN" ]; then
+                    # Try to grab the last long alphanumeric string (likely the token)
+                    EXTRACTED_TOKEN=$(echo "$SETUP_OUTPUT" | grep -oE '[A-Za-z0-9_-]{40,}' | tail -1 || true)
+                fi
+
+                if [ -n "$EXTRACTED_TOKEN" ] && [ -f "$CONFIG_FILE" ]; then
+                    echo "" >> "$CONFIG_FILE"
+                    echo "# Claude Code OAuth token (from setup-token, headless auth)" >> "$CONFIG_FILE"
+                    echo "CLAUDE_CODE_OAUTH_TOKEN=$EXTRACTED_TOKEN" >> "$CONFIG_FILE"
+                    info "Token saved to config.env as CLAUDE_CODE_OAUTH_TOKEN"
+
+                    # Verify with the token set
+                    if CLAUDE_CODE_OAUTH_TOKEN="$EXTRACTED_TOKEN" claude auth status &>/dev/null 2>&1; then
+                        success "Authentication successful (verified with saved token)!"
+                    else
+                        warn "Token was saved but verification still failed."
+                        warn "You may need to re-authenticate later: claude setup-token"
+                    fi
+                else
+                    warn "Could not verify or extract authentication token."
+                    warn "If Lobster can't authenticate later, try: claude setup-token"
+                    AUTH_METHOD="apikey_fallback"
+                fi
             fi
         else
-            warn "OAuth authentication failed or was cancelled."
+            # On systems with a display, auth login works normally
+            echo "Running 'claude auth login'..."
             echo ""
-            echo "Falling back to API key..."
-            AUTH_METHOD="apikey_fallback"
+            if claude auth login; then
+                sleep 1
+                if claude auth status &>/dev/null 2>&1; then
+                    success "Authentication successful (verified)!"
+                else
+                    warn "Auth command completed but verification failed."
+                    AUTH_METHOD="apikey_fallback"
+                fi
+            else
+                warn "OAuth authentication failed or was cancelled."
+                AUTH_METHOD="apikey_fallback"
+            fi
         fi
     fi
 fi
@@ -1543,7 +1658,7 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
                     echo ""
                     read -p "Press Enter to continue..."
                     echo ""
-                    if claude auth login && claude auth status &>/dev/null 2>&1; then
+                    if claude auth login; then
                         success "OAuth authentication successful!"
                     else
                         error "OAuth also failed. Cannot proceed without authentication."
@@ -1565,6 +1680,40 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
             echo "# Anthropic API Key (per-token billing)" >> "$CONFIG_FILE"
             echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> "$CONFIG_FILE"
         fi
+    fi
+fi
+
+#===============================================================================
+# GitHub CLI Authentication
+#===============================================================================
+
+step "Checking GitHub CLI authentication..."
+
+if gh auth status &>/dev/null 2>&1; then
+    success "GitHub CLI already authenticated"
+elif [ "$NON_INTERACTIVE" = true ]; then
+    info "Skipping GitHub CLI auth (non-interactive mode)."
+    info "Authenticate later with: gh auth login"
+elif [ -n "${GITHUB_PAT:-}" ]; then
+    info "Authenticating gh with GITHUB_PAT from environment..."
+    echo "$GITHUB_PAT" | gh auth login --with-token 2>/dev/null && \
+        success "GitHub CLI authenticated via PAT" || \
+        warn "GitHub CLI auth via PAT failed. Authenticate later with: gh auth login"
+else
+    echo ""
+    echo "GitHub CLI (gh) is not authenticated."
+    echo "This is needed for creating PRs, managing issues, etc."
+    echo ""
+    read -p "Authenticate GitHub CLI now? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if gh auth login; then
+            success "GitHub CLI authenticated"
+        else
+            warn "GitHub CLI auth failed. Authenticate later with: gh auth login"
+        fi
+    else
+        info "Skipped. Authenticate later with: gh auth login"
     fi
 fi
 
@@ -1658,6 +1807,7 @@ fi
 
 step "Installing systemd services..."
 
+# Always copy service files (they may have been updated)
 sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
 sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
 
@@ -1689,15 +1839,21 @@ success "Services installed"
 
 step "Registering MCP server with Claude..."
 
-# Remove existing registration if present
-claude mcp remove lobster-inbox 2>/dev/null || true
-
-# Add new registration
 PYTHON_PATH="$INSTALL_DIR/.venv/bin/python"
-if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
-    success "MCP server registered"
+
+# Check if MCP server is already registered
+if claude mcp list 2>/dev/null | grep -q "lobster-inbox"; then
+    success "MCP server already registered (lobster-inbox)"
+    info "Re-registering to ensure config is current..."
+    claude mcp remove lobster-inbox 2>/dev/null || true
+    claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null
+    success "MCP server re-registered"
 else
-    warn "MCP server registration may have failed. Check with: claude mcp list"
+    if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
+        success "MCP server registered"
+    else
+        warn "MCP server registration may have failed. Check with: claude mcp list"
+    fi
 fi
 
 #===============================================================================
@@ -1817,9 +1973,15 @@ run_hook "post-install.sh"
 
 step "Starting Lobster services..."
 
-echo ""
-read -p "Start Lobster services now? [Y/n] " -n 1 -r
-echo
+if [ "$NON_INTERACTIVE" = true ]; then
+    info "Skipping service start (non-interactive mode)."
+    info "Start services manually with: lobster start"
+    REPLY="n"
+else
+    echo ""
+    read -p "Start Lobster services now? [Y/n] " -n 1 -r
+    echo
+fi
 
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     sudo systemctl enable lobster-router lobster-claude
@@ -1898,4 +2060,23 @@ if [ "$INSTALL_MODE" = "tarball" ]; then
 else
     echo -e "${BOLD}Install mode:${NC} git (upgrade with: git pull or lobster upgrade)"
 fi
+if [ "$NON_INTERACTIVE" = true ]; then
+    echo ""
+    echo -e "${YELLOW}Installed in non-interactive mode.${NC}"
+    echo "Some steps were skipped. To complete setup, run the installer interactively:"
+    echo "  bash $INSTALL_DIR/install.sh"
+    echo ""
+fi
+echo ""
+echo -e "${YELLOW}${BOLD}IMPORTANT:${NC} If 'claude' or 'lobster' commands are not found, run:"
+echo ""
+echo -e "  ${BOLD}source ~/.bashrc${NC}"
+echo ""
+echo "This loads the updated PATH into your current terminal session."
+echo ""
+echo -e "${YELLOW}${BOLD}IMPORTANT:${NC} If 'claude' or 'lobster' commands are not found, run:"
+echo ""
+echo -e "  ${BOLD}source ~/.bashrc${NC}"
+echo ""
+echo "This loads the updated PATH into your current terminal session."
 echo ""
