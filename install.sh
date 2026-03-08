@@ -1,19 +1,21 @@
 #!/bin/bash
 #===============================================================================
-# Lobster Bootstrap Installer
+# Lobster Bootstrap Installer (v2)
 #
 # Usage: bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 #
 # This script sets up a complete Lobster installation on a fresh VM:
-# - Installs system dependencies
-# - Clones the repo (if needed)
+# - Installs system dependencies (Ubuntu/Debian)
+# - Clones the repo
 # - Walks through configuration
-# - Sets up Python environment
+# - Sets up Python environment (via uv)
 # - Registers MCP servers with Claude
 # - Installs and starts systemd services
+#
+# Target: Ubuntu 24.04 ARM (Hetzner CAX) -- also works on x86_64
 #===============================================================================
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -29,14 +31,24 @@ info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
-step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
+step() { echo -e "\n${CYAN}${BOLD}>>> $1${NC}"; }
 
-# Configuration - can be overridden by environment variables or config file
+# Parse arguments
+DEV_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --dev) DEV_MODE=true ;;
+    esac
+done
+
+# Configuration - can be overridden by environment variables
 REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
 REPO_BRANCH="${LOBSTER_BRANCH:-main}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+GITHUB_REPO="SiderealPress/lobster"
 
 #===============================================================================
 # Load Configuration
@@ -414,11 +426,11 @@ step "Creating directories..."
 mkdir -p "$WORKSPACE_DIR/logs"
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$INSTALL_DIR/scheduled-tasks"/{tasks,logs}
-mkdir -p "$HOME/projects"/{personal,business}
+mkdir -p "$PROJECTS_DIR"/{personal,business}
 
 success "Directories created"
-info "  ~/projects/personal - Personal projects"
-info "  ~/projects/business - Business/work projects"
+info "  $PROJECTS_DIR/personal - Personal projects"
+info "  $PROJECTS_DIR/business - Business/work projects"
 
 #===============================================================================
 # Scheduled Tasks Setup
