@@ -362,7 +362,8 @@ if ! command -v python3 &>/dev/null; then
     NEED_PYTHON=true
 else
     PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    if [[ $(echo "$PYTHON_VERSION < 3.9" | bc -l 2>/dev/null || echo "0") == "1" ]]; then
+    PYTHON_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
+    if [[ "$PYTHON_MINOR" -lt 9 ]]; then
         warn "Python $PYTHON_VERSION found, but 3.9+ recommended"
     else
         success "Python $PYTHON_VERSION found"
