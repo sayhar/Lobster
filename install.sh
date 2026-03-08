@@ -1504,16 +1504,9 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         fi
 
         if $AUTH_CMD; then
-            # Verify auth status (don't run inference — it can fail for unrelated reasons)
-            if claude auth status &>/dev/null 2>&1; then
-                success "Authentication successful!"
-            else
-                warn "Auth command completed but status check failed."
-                warn "The token may not have been saved correctly."
-                echo ""
-                echo "Falling back to API key..."
-                AUTH_METHOD="apikey_fallback"
-            fi
+            # Trust the exit code — setup-token and auth login store tokens
+            # differently, so auth status may not recognize setup-token tokens
+            success "Authentication successful!"
         else
             warn "OAuth authentication failed or was cancelled."
             echo ""
