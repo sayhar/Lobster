@@ -2011,3 +2011,9 @@ if [ "$NON_INTERACTIVE" = true ]; then
     echo ""
 fi
 echo ""
+echo -e "${YELLOW}${BOLD}IMPORTANT:${NC} If 'claude' or 'lobster' commands are not found, run:"
+echo ""
+echo -e "  ${BOLD}source ~/.bashrc${NC}"
+echo ""
+echo "This loads the updated PATH into your current terminal session."
+echo ""
