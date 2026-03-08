@@ -1531,7 +1531,14 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         # to open in any browser). Unlike setup-token, auth login persists
         # credentials to ~/.claude/.credentials.json with a refresh token.
         if claude auth login; then
-            success "Authentication successful!"
+            # Verify credentials were persisted (warn but don't block if check fails)
+            sleep 1
+            if claude auth status &>/dev/null 2>&1; then
+                success "Authentication successful (verified)!"
+            else
+                warn "Auth login succeeded but credentials may not have persisted."
+                warn "If Lobster can't authenticate later, run: claude auth login"
+            fi
         else
             warn "OAuth authentication failed or was cancelled."
             echo ""
