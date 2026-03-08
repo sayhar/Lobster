@@ -349,6 +349,11 @@ else
     fi
 fi
 
+# Ensure ~/.local/bin is on PATH early (Claude Code installs there)
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 # Check Claude Code
 if command -v claude &>/dev/null; then
     success "Claude Code found"
