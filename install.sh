@@ -1405,7 +1405,7 @@ else
     echo ""
 
     while true; do
-        read -p "Choose [1/2]: " AUTH_CHOICE
+        read -p "Choose [1/2]: " AUTH_CHOICE </dev/tty
         case "$AUTH_CHOICE" in
             1)
                 AUTH_METHOD="oauth"
@@ -1443,39 +1443,56 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         echo "  1) Try setup-token (OAuth via URL + code paste)"
         echo "  2) Use an API key instead"
         echo ""
-        read -p "Choose [1/2]: " HEADLESS_CHOICE
+        read -p "Choose [1/2]: " HEADLESS_CHOICE </dev/tty
         if [ "$HEADLESS_CHOICE" = "2" ]; then
             AUTH_METHOD="apikey_fallback"
         fi
     fi
 
     if [ "$AUTH_METHOD" = "oauth" ]; then
-        echo ""
-        echo "Claude Code will generate an authentication URL."
-        echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
-        echo ""
-        read -p "Press Enter to continue..."
-        echo ""
-
         # Use setup-token on headless, auth login otherwise
         AUTH_CMD="claude auth login"
         if [ "$IS_HEADLESS" = true ]; then
             AUTH_CMD="claude setup-token"
         fi
 
-        if $AUTH_CMD; then
-            # Verify the auth actually works (not just that credentials exist)
-            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                success "OAuth authentication successful (verified)!"
+        AUTH_ATTEMPTS=0
+        MAX_AUTH_ATTEMPTS=3
+        AUTH_VERIFIED=false
+
+        while [ "$AUTH_ATTEMPTS" -lt "$MAX_AUTH_ATTEMPTS" ]; do
+            AUTH_ATTEMPTS=$((AUTH_ATTEMPTS + 1))
+
+            echo ""
+            echo "Claude Code will generate an authentication URL."
+            echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
+            echo ""
+            read -p "Press Enter to continue..." </dev/tty
+            echo ""
+
+            # Run the auth command with stdin from /dev/tty so it can
+            # read user input cleanly even when the script's own stdin
+            # has been redirected or consumed by earlier read commands.
+            if $AUTH_CMD </dev/tty; then
+                # Don't trust exit code alone — verify credentials were persisted
+                if claude auth status 2>/dev/null | grep -q '"loggedIn": true'; then
+                    success "OAuth authentication successful!"
+                    AUTH_VERIFIED=true
+                    break
+                else
+                    warn "Auth command completed but credentials were not saved."
+                fi
             else
-                warn "Auth command completed but API verification failed."
-                warn "The token may have expired or the code exchange didn't complete."
-                echo ""
-                echo "Falling back to API key..."
-                AUTH_METHOD="apikey_fallback"
+                warn "OAuth authentication failed or was cancelled."
             fi
-        else
-            warn "OAuth authentication failed or was cancelled."
+
+            if [ "$AUTH_ATTEMPTS" -lt "$MAX_AUTH_ATTEMPTS" ]; then
+                warn "Auth attempt $AUTH_ATTEMPTS of $MAX_AUTH_ATTEMPTS failed. Retrying..."
+            fi
+        done
+
+        if [ "$AUTH_VERIFIED" != true ]; then
+            warn "All $MAX_AUTH_ATTEMPTS auth attempts failed."
             echo ""
             echo "Falling back to API key..."
             AUTH_METHOD="apikey_fallback"
