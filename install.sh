@@ -1516,7 +1516,7 @@ else
     echo ""
 
     while true; do
-        read -p "Choose [1/2]: " AUTH_CHOICE
+        read -p "Choose [1/2]: " AUTH_CHOICE </dev/tty
         case "$AUTH_CHOICE" in
             1)
                 AUTH_METHOD="oauth"
@@ -1532,6 +1532,11 @@ else
         esac
     done
 fi
+
+# Helper: verify Claude auth status by checking JSON output
+verify_claude_auth() {
+    claude auth status 2>/dev/null | grep -q '"loggedIn": true'
+}
 
 # --- OAuth path ---
 if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
@@ -1553,7 +1558,7 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         echo "  1) Use setup-token (OAuth via URL + code paste, recommended)"
         echo "  2) Use an API key instead"
         echo ""
-        read -p "Choose [1/2]: " HEADLESS_CHOICE
+        read -p "Choose [1/2]: " HEADLESS_CHOICE </dev/tty
         if [ "$HEADLESS_CHOICE" = "2" ]; then
             AUTH_METHOD="apikey_fallback"
         fi
@@ -1564,7 +1569,7 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         echo "Claude Code will generate an authentication URL."
         echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
         echo ""
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue..." </dev/tty
         echo ""
 
         if [ "$IS_HEADLESS" = true ]; then
@@ -1573,12 +1578,12 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
             echo "After completing the flow, you'll need to paste the token back here."
             echo ""
 
-            # Run setup-token with full TTY access (no piping)
-            claude setup-token
+            # Run setup-token with TTY access so it can read interactive input
+            claude setup-token </dev/tty
 
             echo ""
             echo -e "${BOLD}Paste the OAuth token from above:${NC}"
-            read -r OAUTH_TOKEN
+            read -r OAUTH_TOKEN </dev/tty
 
             if [ -n "$OAUTH_TOKEN" ]; then
                 # Save token to config.env
@@ -1595,20 +1600,54 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
             else
                 warn "No token provided. You'll need to set CLAUDE_CODE_OAUTH_TOKEN manually."
             fi
+
+            # Verify the auth actually worked
+            sleep 1
+            if verify_claude_auth; then
+                success "OAuth authentication verified!"
+            else
+                warn "OAuth token saved but 'claude auth status' still shows loggedIn: false."
+                warn "This may resolve after sourcing config.env. Continuing..."
+            fi
         else
             # On systems with a display, auth login works normally
             echo "Running 'claude auth login'..."
             echo ""
-            if claude auth login; then
-                sleep 1
-                if claude auth status &>/dev/null 2>&1; then
-                    success "Authentication successful (verified)!"
+
+            # Retry loop: attempt auth up to 3 times before falling back to API key
+            AUTH_ATTEMPTS=0
+            AUTH_MAX_ATTEMPTS=3
+            AUTH_VERIFIED=false
+
+            while [ "$AUTH_ATTEMPTS" -lt "$AUTH_MAX_ATTEMPTS" ]; do
+                AUTH_ATTEMPTS=$((AUTH_ATTEMPTS + 1))
+
+                if claude auth login </dev/tty; then
+                    sleep 2
+                    if verify_claude_auth; then
+                        success "Authentication successful (verified)!"
+                        AUTH_VERIFIED=true
+                        break
+                    else
+                        if [ "$AUTH_ATTEMPTS" -lt "$AUTH_MAX_ATTEMPTS" ]; then
+                            warn "Auth command completed but verification failed (attempt $AUTH_ATTEMPTS/$AUTH_MAX_ATTEMPTS)."
+                            echo ""
+                            read -p "Press Enter to retry..." </dev/tty
+                            echo ""
+                        fi
+                    fi
                 else
-                    warn "Auth command completed but verification failed."
-                    AUTH_METHOD="apikey_fallback"
+                    warn "OAuth authentication failed or was cancelled (attempt $AUTH_ATTEMPTS/$AUTH_MAX_ATTEMPTS)."
+                    if [ "$AUTH_ATTEMPTS" -lt "$AUTH_MAX_ATTEMPTS" ]; then
+                        echo ""
+                        read -p "Press Enter to retry..." </dev/tty
+                        echo ""
+                    fi
                 fi
-            else
-                warn "OAuth authentication failed or was cancelled."
+            done
+
+            if [ "$AUTH_VERIFIED" != true ]; then
+                warn "OAuth authentication failed after $AUTH_MAX_ATTEMPTS attempts."
                 AUTH_METHOD="apikey_fallback"
             fi
         fi
@@ -1630,7 +1669,7 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
         fi
 
         while true; do
-            read -p "Enter your Anthropic API key: " API_KEY
+            read -p "Enter your Anthropic API key: " API_KEY </dev/tty
             if [ -n "$API_KEY" ]; then
                 export ANTHROPIC_API_KEY="$API_KEY"
                 break
@@ -1640,15 +1679,15 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
                 echo "  1) Enter an API key"
                 echo "  2) Go back and try OAuth instead"
                 echo ""
-                read -p "Choose [1/2]: " RETRY_CHOICE
+                read -p "Choose [1/2]: " RETRY_CHOICE </dev/tty
                 if [ "$RETRY_CHOICE" = "2" ]; then
                     AUTH_METHOD="oauth"
                     echo ""
                     info "Starting OAuth authentication..."
                     echo ""
-                    read -p "Press Enter to continue..."
+                    read -p "Press Enter to continue..." </dev/tty
                     echo ""
-                    if claude auth login; then
+                    if claude auth login </dev/tty; then
                         success "OAuth authentication successful!"
                     else
                         error "OAuth also failed. Cannot proceed without authentication."
