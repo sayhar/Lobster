@@ -754,6 +754,49 @@ else
 fi
 
 #===============================================================================
+# Workspace Migration (lobster-workspace/ → lobster/workspace/)
+#===============================================================================
+
+step "Checking for workspace migration..."
+
+# The canonical workspace is now inside the repo at $INSTALL_DIR/workspace/.
+# If the old location ($HOME/lobster-workspace) exists as a real directory
+# (not already a symlink), migrate its contents and create a compatibility symlink.
+OLD_WORKSPACE="$HOME/lobster-workspace"
+NEW_WORKSPACE_DIR="$INSTALL_DIR/workspace"
+
+if [ -d "$OLD_WORKSPACE" ] && [ ! -L "$OLD_WORKSPACE" ]; then
+    info "Found legacy workspace at $OLD_WORKSPACE — migrating to $NEW_WORKSPACE_DIR..."
+    mkdir -p "$NEW_WORKSPACE_DIR"
+    # Move contents, avoiding overwriting anything already in new location
+    if [ "$(ls -A "$OLD_WORKSPACE" 2>/dev/null)" ]; then
+        cp -a "$OLD_WORKSPACE/." "$NEW_WORKSPACE_DIR/" 2>/dev/null || true
+        # Rename old directory and create symlink for backward compatibility
+        mv "$OLD_WORKSPACE" "${OLD_WORKSPACE}.bak-$(date +%Y%m%d%H%M%S)"
+        ln -s "$NEW_WORKSPACE_DIR" "$OLD_WORKSPACE"
+        success "Migrated workspace to $NEW_WORKSPACE_DIR"
+        success "Compatibility symlink: $OLD_WORKSPACE → $NEW_WORKSPACE_DIR"
+    else
+        rmdir "$OLD_WORKSPACE" 2>/dev/null || true
+        ln -s "$NEW_WORKSPACE_DIR" "$OLD_WORKSPACE"
+        success "Created workspace at $NEW_WORKSPACE_DIR (was empty)"
+        success "Compatibility symlink: $OLD_WORKSPACE → $NEW_WORKSPACE_DIR"
+    fi
+elif [ -L "$OLD_WORKSPACE" ]; then
+    info "Workspace symlink already exists at $OLD_WORKSPACE"
+else
+    # No old workspace — create new one and symlink
+    mkdir -p "$NEW_WORKSPACE_DIR"
+    ln -sf "$NEW_WORKSPACE_DIR" "$OLD_WORKSPACE"
+    success "Created workspace at $NEW_WORKSPACE_DIR"
+    success "Compatibility symlink: $OLD_WORKSPACE → $NEW_WORKSPACE_DIR"
+fi
+
+# Update WORKSPACE_DIR to point to the new canonical location inside the repo
+WORKSPACE_DIR="$NEW_WORKSPACE_DIR"
+PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
+
+#===============================================================================
 # Create Directories
 #===============================================================================
 
@@ -780,6 +823,18 @@ if [ -d "$TEMPLATES_DIR" ]; then
             info "  Seeded canonical template: $base"
         fi
     done
+fi
+
+# Install user agent templates (only if user/agents/ doesn't already exist)
+USER_AGENTS_DIR="$INSTALL_DIR/user/agents"
+USER_TEMPLATES_DIR="$INSTALL_DIR/user-templates/agents"
+if [ ! -d "$USER_AGENTS_DIR" ] && [ -d "$USER_TEMPLATES_DIR" ]; then
+    mkdir -p "$USER_AGENTS_DIR"
+    cp "$USER_TEMPLATES_DIR"/*.agent.md "$USER_AGENTS_DIR/" 2>/dev/null || true
+    success "User agent templates copied to $USER_AGENTS_DIR"
+    info "  Edit user/agents/base.agent.md to add your personal context"
+elif [ -d "$USER_AGENTS_DIR" ]; then
+    info "User agents directory already exists — skipping template copy"
 fi
 
 success "Directories created"
@@ -1168,6 +1223,27 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping link enforcement hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to block edits to system files
+chmod +x "$INSTALL_DIR/hooks/no-system-edit.py"
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("no-system-edit"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Write|Edit|Bash",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/no-system-edit.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "System file protection hook installed"
+    else
+        info "System file protection hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping system file protection hook (settings.json not yet created)"
 fi
 
 #===============================================================================
@@ -1986,90 +2062,36 @@ sudo chmod +x /usr/local/bin/lobster
 success "CLI installed"
 
 #===============================================================================
-# Create Workspace Context
+# Workspace Context (CLAUDE.md)
 #===============================================================================
 
-step "Creating workspace context..."
+step "Verifying workspace context..."
 
-cat > "$WORKSPACE_DIR/CLAUDE.md" << 'EOF'
-# Lobster System Context
+# The full CLAUDE.md now lives in the repo root ($INSTALL_DIR/CLAUDE.md).
+# Claude Code sessions start with CWD=$INSTALL_DIR and will automatically
+# find and load CLAUDE.md from there. No separate workspace copy is needed.
+#
+# For backward compatibility with any tooling that expects CLAUDE.md in the
+# workspace dir, we create a symlink pointing back to the repo root CLAUDE.md.
+if [ ! -f "$WORKSPACE_DIR/CLAUDE.md" ] && [ ! -L "$WORKSPACE_DIR/CLAUDE.md" ]; then
+    ln -s "$INSTALL_DIR/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
+    info "Symlinked workspace CLAUDE.md → $INSTALL_DIR/CLAUDE.md"
+fi
 
-You are **Lobster**, an always-on AI assistant. You process messages from Telegram and respond to users.
+success "Workspace context ready (CLAUDE.md in repo root)"
 
-## CRITICAL: Dispatcher Pattern
+# Legacy stub section (kept for reference - the actual CLAUDE.md is the full
+# 600-line version in the repo root, not this stripped-down workspace version):
+#
+# cat > "$WORKSPACE_DIR/CLAUDE.md" << 'EOF'
+# # Lobster System Context
+# You are **Lobster**, an always-on AI assistant...
+# EOF
+#
+# The above pattern is DEPRECATED. Claude Code now starts in $INSTALL_DIR and
+# reads the full CLAUDE.md directly. The workspace/CLAUDE.md symlink above
+# is only for backward compatibility.
 
-You are a **dispatcher**, not a worker. Stay responsive to incoming messages.
-
-**Rules:**
-1. **Quick tasks (< 30 seconds)**: Handle directly, then return to loop
-2. **Substantial tasks (> 30 seconds)**: ALWAYS delegate to a subagent
-3. **NEVER** spend more than 30 seconds before returning to `wait_for_messages()`
-
-**For substantial work:**
-1. Acknowledge: "I'll work on that now. I'll report back when done."
-2. Spawn subagent: `Task(prompt="...", subagent_type="general-purpose")`
-3. IMMEDIATELY return to `wait_for_messages()` - don't wait for subagent
-4. When subagent completes, relay results to user
-
-**Tasks that MUST use subagents:**
-- Code review or analysis
-- Implementing features
-- Debugging issues
-- Research tasks
-- GitHub issue work (use `functional-engineer` agent)
-
-## Your Responsibilities
-
-1. **Monitor inbox**: Use `wait_for_messages` to block until messages arrive
-2. **Acknowledge quickly**: Send brief acknowledgment within seconds
-3. **Delegate work**: Use Task tool for anything taking > 30 seconds
-4. **Return to loop**: Call `wait_for_messages()` immediately after delegating
-
-## Available Tools (MCP)
-
-### Message Queue
-- `wait_for_messages(timeout?)` - Block until messages arrive (PRIMARY)
-- `check_inbox(source?, limit?)` - Non-blocking inbox check
-- `send_reply(chat_id, text, source?)` - Send a reply
-- `mark_processed(message_id)` - Mark message handled
-- `list_sources()` - List available channels
-- `get_stats()` - Inbox statistics
-
-### Task Management
-- `list_tasks(status?)` - List all tasks
-- `create_task(subject, description?)` - Create task
-- `update_task(task_id, status?, ...)` - Update task
-- `get_task(task_id)` - Get task details
-- `delete_task(task_id)` - Delete task
-
-### Scheduled Jobs (Cron Tasks)
-- `create_scheduled_job(name, schedule, context)` - Create scheduled job
-- `list_scheduled_jobs()` - List all scheduled jobs
-- `get_scheduled_job(name)` - Get job details
-- `update_scheduled_job(name, schedule?, context?, enabled?)` - Update job
-- `delete_scheduled_job(name)` - Delete scheduled job
-- `check_task_outputs(since?, limit?, job_name?)` - Check job outputs
-- `write_task_output(job_name, output, status?)` - Write job output
-
-## Project Directory Convention
-
-All Lobster-managed projects live in \`\$LOBSTER_WORKSPACE/projects/[project-name]/\`.
-
-- **Clone repos here**, not in \`~/projects/\` or elsewhere
-- The \`projects/\` directory is created automatically during install
-- Environment variable: \`\$LOBSTER_PROJECTS\` (defaults to \`\$LOBSTER_WORKSPACE/projects\`)
-- This is a system property, not a suggestion -- all project work goes here
-
-## Behavior Guidelines
-
-- Be concise (users are on mobile)
-- Be helpful (answer directly)
-- Delegate substantial work to subagents
-- Return to wait_for_messages() within 30 seconds
-- Use functional-engineer agent for GitHub issue work
-EOF
-
-success "Workspace context created"
 
 #===============================================================================
 # Apply Private Configuration Overlay
