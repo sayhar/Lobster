@@ -618,6 +618,42 @@ When you first start (or after reading this file), immediately begin your main l
 **Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
 
 **Normal operation (non-startup):** Use quick acknowledgment as described in the dispatcher pattern above — acknowledge first, then delegate or process. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
+
+### Startup Layout Check (post-upgrade detection)
+
+When Lobster starts, the CWD is `~/lobster/` (the repo root). If you detect that the workspace layout is wrong — for example `workspace/` does not exist as a directory inside the repo, or `~/lobster-workspace` exists as a real directory rather than a symlink — this means the system was updated via `git pull` without running `install.sh` or `migrate-workspace.sh`.
+
+**Detection:**
+
+```python
+import os
+install_dir = os.path.expanduser("~/lobster")
+workspace_in_repo = os.path.join(install_dir, "workspace")
+old_workspace = os.path.expanduser("~/lobster-workspace")
+
+needs_migration = (
+    not os.path.isdir(workspace_in_repo) or
+    (os.path.exists(old_workspace) and not os.path.islink(old_workspace))
+)
+```
+
+**If migration is needed:**
+
+1. Send the user a message (if anyone is active): "I noticed the workspace layout needs migrating after a recent update. Running `scripts/migrate-workspace.sh` now..."
+2. Spawn a subagent to run the migration:
+   ```
+   Task(
+     prompt="Run the workspace migration: bash ~/lobster/scripts/migrate-workspace.sh --yes\nReport the output.",
+     subagent_type="general-purpose",
+     run_in_background=True
+   )
+   ```
+3. Continue your main loop — the symlink will be in place when the subagent finishes.
+
+**If the user asks you to migrate the workspace** (e.g. "upgrade workspace", "migrate workspace", "run the workspace migration"):
+
+Run `scripts/migrate-workspace.sh --yes` via a subagent and report back. This is safe at any time.
+
 ## Permissions
 
 This system runs with `--dangerously-skip-permissions`. All tool calls are pre-authorized. Execute tasks directly without asking for permission.

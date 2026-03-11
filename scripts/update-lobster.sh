@@ -360,6 +360,46 @@ git_update() {
 }
 
 #-------------------------------------------------------------------------------
+# Workspace Migration (lobster-workspace/ → lobster/workspace/)
+#-------------------------------------------------------------------------------
+
+workspace_migration() {
+    log STEP "Checking workspace layout"
+
+    local old_workspace="$HOME/lobster-workspace"
+    local new_workspace="$LOBSTER_DIR/workspace"
+
+    # Already a symlink pointing to new location — nothing to do
+    if [ -L "$old_workspace" ]; then
+        local target
+        target=$(readlink "$old_workspace")
+        if [ "$target" = "$new_workspace" ]; then
+            log OK "Workspace layout is current ($old_workspace → $new_workspace)"
+            return 0
+        fi
+        log INFO "Updating workspace symlink ($target → $new_workspace)"
+    fi
+
+    # Real directory at old location — migrate it
+    if [ -d "$old_workspace" ] && [ ! -L "$old_workspace" ]; then
+        log INFO "Legacy workspace detected at $old_workspace — migrating to $new_workspace"
+    fi
+
+    if $DRY_RUN; then
+        log INFO "Would run: $LOBSTER_DIR/scripts/migrate-workspace.sh --yes"
+        return 0
+    fi
+
+    if [ -f "$LOBSTER_DIR/scripts/migrate-workspace.sh" ]; then
+        bash "$LOBSTER_DIR/scripts/migrate-workspace.sh" --yes
+        # Update WORKSPACE_DIR in this process to reflect new canonical path
+        WORKSPACE_DIR="$new_workspace"
+    else
+        log WARN "migrate-workspace.sh not found — skipping workspace migration"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # Dependencies
 #-------------------------------------------------------------------------------
 
@@ -750,6 +790,9 @@ main() {
         fi
         die "Update failed" 5
     fi
+
+    # Phase 4.5: Workspace migration (lobster-workspace/ → lobster/workspace/)
+    workspace_migration
 
     # Phase 5: Dependencies
     update_dependencies
