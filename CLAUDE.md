@@ -502,52 +502,85 @@ wait_for_messages() ← loop back
 
 ## Project Directory Convention
 
-All Lobster-managed projects live in `workspace/projects/[project-name]/` (relative to the repo root).
+All Lobster-managed projects live in `lobster-workspace/projects/[project-name]/` (inside the repo, gitignored).
 
 - **Clone repos here**, not in `~/projects/` or elsewhere
 - The `projects/` directory is created automatically during install
 - Environment variable: `$LOBSTER_PROJECTS` (defaults to `$LOBSTER_WORKSPACE/projects`)
-- Absolute path: `~/lobster/workspace/projects/`
+- Absolute path: `~/lobster/lobster-workspace/projects/` (also accessible via `~/lobster-workspace/projects/` symlink)
 - This is a system property, not a suggestion -- all project work goes here
+
+## System Architecture: Four Tiers
+
+Lobster uses a four-tier architecture that maps to how Claude Code discovers files:
+
+```
+Tier 1: System (git-managed, read-only at runtime)
+  ~/lobster/CLAUDE.md            ← discovered by CC walking UP from CWD
+  ~/lobster/src/
+  ~/lobster/hooks/
+  ~/lobster/services/
+
+Tier 2: User config (gitignored, editable)
+  ~/lobster/user/agents/*.agent.md    ← personal context (read at session start)
+  ~/lobster/user/preferences/         ← structured persistent preferences
+
+Tier 3: Secrets (external, never in repo)
+  ~/lobster-config/config.env         ← API keys, tokens, Telegram credentials
+
+Tier 4: Workspace (gitignored, CWD for CC sessions)
+  ~/lobster/lobster-workspace/        ← CWD; CC finds CLAUDE.md by walking UP
+  ~/lobster-workspace/                ← compatibility symlink → lobster-workspace/
+```
 
 ## Agent Configuration Files
 
 Lobster uses `.agent.md` files to define subagent behavior. There are two tiers:
 
-### System Agents (read-only, git-managed)
-Located in `.claude/agents/*.agent.md`. These are committed to the repo and define core system behavior:
+### System Agents (read-only, installed to ~/.claude/agents/)
+
+Source files are in `.claude/agents/*.agent.md` in the repo. During install, they are **copied to `~/.claude/agents/`** so Claude Code loads them regardless of working directory.
+
+Claude Code discovery rule: `~/.claude/agents/` is always merged with CWD-based `.claude/agents/` — no directory traversal, so system agents MUST be in `~/.claude/agents/`.
+
+System agents:
 - `brain-dumps.agent.md` — Voice note brain dump processor
 - `functional-engineer.agent.md` — GitHub issue implementation agent
 - `lobster-ops.agent.md` — System operations agent
 
-**System agents are read-only.** Do not edit them directly. They are updated via git.
+**System agents are read-only at runtime.** They are updated via `git pull` + `install.sh`.
 
-### User Agents (editable, gitignored)
-Located in `user/agents/*.agent.md`. These are gitignored and contain per-user customizations:
+### User Agents (editable, CWD-based)
+
+Located in `lobster-workspace/.claude/agents/*.agent.md`. These are gitignored and contain per-user customizations. CC discovers them because CWD = `lobster-workspace/`.
+
 - `base.agent.md` — Personality, preferences, and personal context (included in ALL subagents)
 - `orchestrator.agent.md` — Custom dispatch loop instructions
 - Any additional agents you create
 
-Templates for user agents live in `user-templates/agents/` and are copied to `user/agents/` during install.
+Templates for user agents live in `user-templates/agents/` and are copied to `lobster-workspace/.claude/agents/` during install.
 
 ### Session Start Behavior
 
-At the start of each session, read all files matching `user/agents/*.agent.md` and apply their instructions. The `base.agent.md` file (if it exists) contains your personality and preferences context.
+At the start of each session, read all files matching `lobster-workspace/.claude/agents/*.agent.md` and apply their instructions. The `base.agent.md` file (if it exists) contains your personality and preferences context.
+
+Also read `user/agents/base.agent.md` if it exists for additional personal context.
 
 ### Spawning Subagents
 
-When spawning ANY subagent, always include the contents of `user/agents/base.agent.md` in the prompt if that file exists. This ensures personality and preferences are inherited by all agents.
+When spawning ANY subagent, always include the contents of `lobster-workspace/.claude/agents/base.agent.md` in the prompt if that file exists. This ensures personality and preferences are inherited by all agents.
 
 ## Key Directories
 
-- `~/lobster/` - Repository (CWD for Claude Code session)
-  - `.claude/agents/` - System agent definitions (read-only, git-managed)
+- `~/lobster/` - Repository root (git-managed, Tier 1 system files)
+  - `.claude/agents/` - System agent SOURCE files (installed to ~/.claude/agents/ by install.sh)
   - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
   - `user-templates/agents/` - Templates for user agent files
-  - `workspace/` - Runtime data (gitignored)
-  - `user/` - User customization files (gitignored)
-- `workspace/` - Runtime data (gitignored, relative to repo root)
+  - `lobster-workspace/` - Runtime workspace (gitignored, CC CWD)
+  - `user/` - User customization (gitignored)
+- `~/lobster/lobster-workspace/` - Runtime workspace (Tier 4, CWD for CC sessions)
+  - `.claude/agents/` - User agent files (CWD-based, discovered by CC)
   - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
@@ -557,8 +590,12 @@ When spawning ANY subagent, always include the contents of `user/agents/base.age
   - `scheduled-jobs/tasks/` - Task definition markdown files
   - `scheduled-jobs/logs/` - Execution logs
   - `logs/` - MCP server logs
-- `user/` - User customization (gitignored, relative to repo root)
-  - `agents/` - User agent files (`*.agent.md`)
+- `~/lobster-workspace/` - Compatibility symlink → `~/lobster/lobster-workspace/`
+- `~/lobster/user/` - User customization (Tier 2, gitignored)
+  - `agents/` - User agent files (read at session start for personal context)
+  - `preferences/` - Structured persistent user preferences
+- `~/lobster-config/` - Secrets (Tier 3, external to repo)
+  - `config.env` - API keys, tokens, Telegram credentials
 - `~/messages/inbox/` - Incoming messages (JSON files)
 - `~/messages/processing/` - Messages currently being processed (claimed)
 - `~/messages/outbox/` - Outgoing replies (JSON files)
@@ -621,19 +658,19 @@ When you first start (or after reading this file), immediately begin your main l
 
 ### Startup Layout Check (post-upgrade detection)
 
-When Lobster starts, the CWD is `~/lobster/` (the repo root). If you detect that the workspace layout is wrong — for example `workspace/` does not exist as a directory inside the repo, or `~/lobster-workspace` exists as a real directory rather than a symlink — this means the system was updated via `git pull` without running `install.sh` or `migrate-workspace.sh`.
+When Lobster starts, the CWD is `~/lobster/lobster-workspace/`. If you detect that the workspace layout is wrong — for example `lobster-workspace/` does not exist inside the repo, or `~/lobster-workspace` exists as a real directory rather than a symlink — this means the system was updated via `git pull` without running `install.sh` or `migrate-workspace.sh`.
 
 **Detection:**
 
 ```python
 import os
 install_dir = os.path.expanduser("~/lobster")
-workspace_in_repo = os.path.join(install_dir, "workspace")
-old_workspace = os.path.expanduser("~/lobster-workspace")
+workspace_in_repo = os.path.join(install_dir, "lobster-workspace")
+compat_link = os.path.expanduser("~/lobster-workspace")
 
 needs_migration = (
     not os.path.isdir(workspace_in_repo) or
-    (os.path.exists(old_workspace) and not os.path.islink(old_workspace))
+    (os.path.exists(compat_link) and not os.path.islink(compat_link))
 )
 ```
 

@@ -66,11 +66,25 @@ config/camofox-browser/
 PLAN-*.md
 .planning/
 
-# Runtime workspace (user data, not committed)
-# Directory is tracked (via .gitkeep) but contents are ignored
-workspace/*
-!workspace/.gitkeep
+# Runtime workspace (inside repo, gitignored except structure markers)
+# CWD for Claude Code sessions - CLAUDE.md is found by walking up from here
+lobster-workspace/*
+!lobster-workspace/.gitkeep
+!lobster-workspace/.claude/
+lobster-workspace/.claude/*
+!lobster-workspace/.claude/agents/
+lobster-workspace/.claude/agents/*
+!lobster-workspace/.claude/agents/.gitkeep
+
+# Secrets / external config (kept outside repo at ~/lobster-config/)
+lobster-config/
 
 # User customization files (directory tracked, contents ignored)
 user/*
 !user/.gitkeep
+!user/agents/
+user/agents/*
+!user/agents/.gitkeep
+!user/preferences/
+user/preferences/*
+!user/preferences/.gitkeep

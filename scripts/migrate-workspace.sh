@@ -2,9 +2,10 @@
 #===============================================================================
 # Lobster Workspace Migration Script
 #
-# Migrates the workspace from the old layout (~/lobster-workspace/ as a
-# standalone directory) to the new layout (~/lobster/workspace/ inside the
-# repo), and creates a backward-compatibility symlink so existing scripts,
+# Migrates the workspace from the old external layout (~/lobster-workspace/ as a
+# standalone directory outside the repo) to the new layout
+# (~/lobster/lobster-workspace/ inside the repo, gitignored), and creates a
+# backward-compatibility symlink at ~/lobster-workspace so existing scripts,
 # env vars, and MCP servers continue working without changes.
 #
 # Safe to run multiple times (idempotent). Run this after `git pull` if you
@@ -72,7 +73,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
 
 OLD_WORKSPACE="$HOME/lobster-workspace"
-NEW_WORKSPACE="$INSTALL_DIR/workspace"
+NEW_WORKSPACE="$INSTALL_DIR/lobster-workspace"
 
 echo -e "${BLUE}${BOLD}"
 echo "═══════════════════════════════════════════════════════════════"

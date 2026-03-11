@@ -51,7 +51,10 @@ done
 REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
 REPO_BRANCH="${LOBSTER_BRANCH:-main}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+# Workspace lives INSIDE the repo at lobster-workspace/ (gitignored).
+# The canonical internal path is $INSTALL_DIR/lobster-workspace.
+# LOBSTER_WORKSPACE env var and the ~/lobster-workspace symlink both point here.
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$INSTALL_DIR/lobster-workspace}"
 PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 GITHUB_REPO="SiderealPress/lobster"
@@ -189,20 +192,22 @@ apply_private_overlay() {
         success "Applied: config.env"
     fi
 
-    # Overlay CLAUDE.md if exists (replaces default)
+    # Overlay CLAUDE.md if exists
+    # Note: CLAUDE.md lives in repo root and is found by CC via parent-dir traversal.
+    # Private overlay goes to repo root (git-managed file, handled carefully).
     if [ -f "$config_dir/CLAUDE.md" ]; then
-        cp "$config_dir/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
-        success "Applied: CLAUDE.md"
+        cp "$config_dir/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
+        success "Applied: CLAUDE.md (repo root)"
     fi
 
-    # Merge custom agents (additive)
+    # Merge custom system agents to ~/.claude/agents/ (always loaded regardless of CWD)
     if [ -d "$config_dir/agents" ]; then
-        mkdir -p "$INSTALL_DIR/.claude/agents"
+        mkdir -p "$HOME/.claude/agents"
         local agent_count=0
         for agent in "$config_dir/agents"/*.md; do
             [ -f "$agent" ] || continue
-            cp "$agent" "$INSTALL_DIR/.claude/agents/"
-            success "Applied agent: $(basename "$agent")"
+            cp "$agent" "$HOME/.claude/agents/"
+            success "Applied system agent: $(basename "$agent")"
             agent_count=$((agent_count + 1))
         done
         if [ "$agent_count" -eq 0 ]; then
@@ -754,46 +759,57 @@ else
 fi
 
 #===============================================================================
-# Workspace Migration (lobster-workspace/ → lobster/workspace/)
+# Workspace Setup (lobster-workspace/ inside the repo)
 #===============================================================================
 
-step "Checking for workspace migration..."
+step "Setting up workspace..."
 
-# The canonical workspace is now inside the repo at $INSTALL_DIR/workspace/.
-# If the old location ($HOME/lobster-workspace) exists as a real directory
-# (not already a symlink), migrate its contents and create a compatibility symlink.
-OLD_WORKSPACE="$HOME/lobster-workspace"
-NEW_WORKSPACE_DIR="$INSTALL_DIR/workspace"
+# The canonical workspace is $INSTALL_DIR/lobster-workspace/ (inside the repo, gitignored).
+# Claude Code CWD is set to lobster-workspace/ so CC discovers:
+#   - CLAUDE.md by walking UP to repo root
+#   - .claude/agents/ at CWD = lobster-workspace/.claude/agents/ (user agents)
+#   - ~/.claude/agents/ = system agents (installed separately below)
+#
+# For backward compatibility, ~/lobster-workspace is a symlink → $INSTALL_DIR/lobster-workspace.
+# All existing scripts/env vars using $HOME/lobster-workspace continue to work.
 
-if [ -d "$OLD_WORKSPACE" ] && [ ! -L "$OLD_WORKSPACE" ]; then
-    info "Found legacy workspace at $OLD_WORKSPACE — migrating to $NEW_WORKSPACE_DIR..."
-    mkdir -p "$NEW_WORKSPACE_DIR"
-    # Move contents, avoiding overwriting anything already in new location
-    if [ "$(ls -A "$OLD_WORKSPACE" 2>/dev/null)" ]; then
-        cp -a "$OLD_WORKSPACE/." "$NEW_WORKSPACE_DIR/" 2>/dev/null || true
-        # Rename old directory and create symlink for backward compatibility
-        mv "$OLD_WORKSPACE" "${OLD_WORKSPACE}.bak-$(date +%Y%m%d%H%M%S)"
-        ln -s "$NEW_WORKSPACE_DIR" "$OLD_WORKSPACE"
-        success "Migrated workspace to $NEW_WORKSPACE_DIR"
-        success "Compatibility symlink: $OLD_WORKSPACE → $NEW_WORKSPACE_DIR"
+NEW_WORKSPACE_DIR="$INSTALL_DIR/lobster-workspace"
+COMPAT_LINK="$HOME/lobster-workspace"
+
+# Ensure the canonical workspace directory exists
+mkdir -p "$NEW_WORKSPACE_DIR"
+
+# Handle migration: if $HOME/lobster-workspace was previously a standalone directory
+# (pre-Option-C layout), move its contents inside the repo.
+if [ -d "$COMPAT_LINK" ] && [ ! -L "$COMPAT_LINK" ]; then
+    info "Found standalone workspace at $COMPAT_LINK — migrating contents inside repo..."
+    if [ "$(ls -A "$COMPAT_LINK" 2>/dev/null)" ]; then
+        cp -a "$COMPAT_LINK/." "$NEW_WORKSPACE_DIR/" 2>/dev/null || true
+        mv "$COMPAT_LINK" "${COMPAT_LINK}.bak-$(date +%Y%m%d%H%M%S)"
+        success "Workspace contents migrated to $NEW_WORKSPACE_DIR"
     else
-        rmdir "$OLD_WORKSPACE" 2>/dev/null || true
-        ln -s "$NEW_WORKSPACE_DIR" "$OLD_WORKSPACE"
-        success "Created workspace at $NEW_WORKSPACE_DIR (was empty)"
-        success "Compatibility symlink: $OLD_WORKSPACE → $NEW_WORKSPACE_DIR"
+        rmdir "$COMPAT_LINK" 2>/dev/null || true
     fi
-elif [ -L "$OLD_WORKSPACE" ]; then
-    info "Workspace symlink already exists at $OLD_WORKSPACE"
+    ln -s "$NEW_WORKSPACE_DIR" "$COMPAT_LINK"
+    success "Compatibility symlink: $COMPAT_LINK → $NEW_WORKSPACE_DIR"
+elif [ -L "$COMPAT_LINK" ]; then
+    # Already a symlink — verify it points to the right place
+    current_target=$(readlink "$COMPAT_LINK")
+    if [ "$current_target" != "$NEW_WORKSPACE_DIR" ]; then
+        rm "$COMPAT_LINK"
+        ln -s "$NEW_WORKSPACE_DIR" "$COMPAT_LINK"
+        success "Updated symlink: $COMPAT_LINK → $NEW_WORKSPACE_DIR"
+    else
+        info "Workspace symlink already correct: $COMPAT_LINK → $NEW_WORKSPACE_DIR"
+    fi
 else
-    # No old workspace — create new one and symlink
-    mkdir -p "$NEW_WORKSPACE_DIR"
-    ln -sf "$NEW_WORKSPACE_DIR" "$OLD_WORKSPACE"
-    success "Created workspace at $NEW_WORKSPACE_DIR"
-    success "Compatibility symlink: $OLD_WORKSPACE → $NEW_WORKSPACE_DIR"
+    # Fresh install — create the symlink
+    ln -s "$NEW_WORKSPACE_DIR" "$COMPAT_LINK"
+    success "Created workspace: $NEW_WORKSPACE_DIR"
+    success "Compatibility symlink: $COMPAT_LINK → $NEW_WORKSPACE_DIR"
 fi
 
-# Update WORKSPACE_DIR to point to the new canonical location inside the repo
-WORKSPACE_DIR="$NEW_WORKSPACE_DIR"
+# WORKSPACE_DIR is already set to $INSTALL_DIR/lobster-workspace from the top of the script.
 PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 
 #===============================================================================
@@ -825,16 +841,48 @@ if [ -d "$TEMPLATES_DIR" ]; then
     done
 fi
 
-# Install user agent templates (only if user/agents/ doesn't already exist)
-USER_AGENTS_DIR="$INSTALL_DIR/user/agents"
+# Create user/preferences/ directory (structured persistent preferences)
+mkdir -p "$INSTALL_DIR/user/preferences"
+
+# Install system agents to ~/.claude/agents/
+# System agents must be in ~/.claude/agents/ (user-level, always loaded regardless of CWD).
+# .claude/agents/ at repo root would NOT be found when CWD=lobster-workspace/.
+# ~/.claude/agents/ IS merged with CWD-based .claude/agents/ by Claude Code.
+SYSTEM_AGENTS_SRC="$INSTALL_DIR/.claude/agents"
+SYSTEM_AGENTS_DEST="$HOME/.claude/agents"
+if [ -d "$SYSTEM_AGENTS_SRC" ]; then
+    mkdir -p "$SYSTEM_AGENTS_DEST"
+    for agent in "$SYSTEM_AGENTS_SRC"/*.agent.md; do
+        [ -f "$agent" ] || continue
+        agent_name=$(basename "$agent")
+        # Only install/overwrite system agents — don't clobber user customizations
+        dest_file="$SYSTEM_AGENTS_DEST/$agent_name"
+        cp "$agent" "$dest_file"
+        success "  System agent installed: ~/.claude/agents/$agent_name"
+    done
+    success "System agents installed to ~/.claude/agents/"
+    info "  System agents are always loaded by Claude Code regardless of working directory"
+else
+    info "No system agents found at $SYSTEM_AGENTS_SRC"
+fi
+
+# Set up user agents in lobster-workspace/.claude/agents/
+# These are CWD-based agents (discovered because CC CWD = lobster-workspace/).
+# Merged with system agents from ~/.claude/agents/ at runtime.
+USER_AGENTS_DIR="$WORKSPACE_DIR/.claude/agents"
 USER_TEMPLATES_DIR="$INSTALL_DIR/user-templates/agents"
-if [ ! -d "$USER_AGENTS_DIR" ] && [ -d "$USER_TEMPLATES_DIR" ]; then
+if [ -d "$USER_TEMPLATES_DIR" ]; then
     mkdir -p "$USER_AGENTS_DIR"
-    cp "$USER_TEMPLATES_DIR"/*.agent.md "$USER_AGENTS_DIR/" 2>/dev/null || true
-    success "User agent templates copied to $USER_AGENTS_DIR"
-    info "  Edit user/agents/base.agent.md to add your personal context"
-elif [ -d "$USER_AGENTS_DIR" ]; then
-    info "User agents directory already exists — skipping template copy"
+    for tmpl in "$USER_TEMPLATES_DIR"/*.agent.md; do
+        [ -f "$tmpl" ] || continue
+        tmpl_name=$(basename "$tmpl")
+        dest_file="$USER_AGENTS_DIR/$tmpl_name"
+        if [ ! -f "$dest_file" ]; then
+            cp "$tmpl" "$dest_file"
+            success "  User agent template: lobster-workspace/.claude/agents/$tmpl_name"
+        fi
+    done
+    info "  Edit lobster-workspace/.claude/agents/base.agent.md to add your personal context"
 fi
 
 success "Directories created"
@@ -2062,35 +2110,30 @@ sudo chmod +x /usr/local/bin/lobster
 success "CLI installed"
 
 #===============================================================================
-# Workspace Context (CLAUDE.md)
+# Workspace Context (CLAUDE.md discovery)
 #===============================================================================
 
 step "Verifying workspace context..."
 
-# The full CLAUDE.md now lives in the repo root ($INSTALL_DIR/CLAUDE.md).
-# Claude Code sessions start with CWD=$INSTALL_DIR and will automatically
-# find and load CLAUDE.md from there. No separate workspace copy is needed.
+# CWD for Claude Code sessions is $INSTALL_DIR/lobster-workspace/.
+# Claude Code discovers CLAUDE.md by walking UP from CWD → finds repo root CLAUDE.md.
+# No symlink or copy is needed — CC traversal handles it automatically.
 #
-# For backward compatibility with any tooling that expects CLAUDE.md in the
-# workspace dir, we create a symlink pointing back to the repo root CLAUDE.md.
-if [ ! -f "$WORKSPACE_DIR/CLAUDE.md" ] && [ ! -L "$WORKSPACE_DIR/CLAUDE.md" ]; then
-    ln -s "$INSTALL_DIR/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
-    info "Symlinked workspace CLAUDE.md → $INSTALL_DIR/CLAUDE.md"
+# Agent discovery:
+#   ~/.claude/agents/       System agents (installed above, always loaded)
+#   $CWD/.claude/agents/    User agents (lobster-workspace/.claude/agents/, CWD-based)
+#   Both sets are merged by Claude Code at runtime.
+
+if [ -d "$WORKSPACE_DIR" ]; then
+    success "Workspace ready at $WORKSPACE_DIR"
+    info "  CWD for CC sessions: $WORKSPACE_DIR"
+    info "  CLAUDE.md found by CC via parent-dir traversal (repo root)"
+    info "  User agents: $WORKSPACE_DIR/.claude/agents/"
+    info "  System agents: $HOME/.claude/agents/"
+else
+    error "Workspace directory not found: $WORKSPACE_DIR"
+    exit 1
 fi
-
-success "Workspace context ready (CLAUDE.md in repo root)"
-
-# Legacy stub section (kept for reference - the actual CLAUDE.md is the full
-# 600-line version in the repo root, not this stripped-down workspace version):
-#
-# cat > "$WORKSPACE_DIR/CLAUDE.md" << 'EOF'
-# # Lobster System Context
-# You are **Lobster**, an always-on AI assistant...
-# EOF
-#
-# The above pattern is DEPRECATED. Claude Code now starts in $INSTALL_DIR and
-# reads the full CLAUDE.md directly. The workspace/CLAUDE.md symlink above
-# is only for backward compatibility.
 
 
 #===============================================================================
