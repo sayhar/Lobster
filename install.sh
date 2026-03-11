@@ -866,10 +866,9 @@ else
     info "No system agents found at $SYSTEM_AGENTS_SRC"
 fi
 
-# Set up user agents in lobster-workspace/.claude/agents/
-# These are CWD-based agents (discovered because CC CWD = lobster-workspace/).
-# Merged with system agents from ~/.claude/agents/ at runtime.
-USER_AGENTS_DIR="$WORKSPACE_DIR/.claude/agents"
+# Set up user agents in user/agents/
+# These are read explicitly by CLAUDE.md at session start — not via CC's native discovery.
+USER_AGENTS_DIR="$INSTALL_DIR/user/agents"
 USER_TEMPLATES_DIR="$INSTALL_DIR/user-templates/agents"
 if [ -d "$USER_TEMPLATES_DIR" ]; then
     mkdir -p "$USER_AGENTS_DIR"
@@ -879,10 +878,10 @@ if [ -d "$USER_TEMPLATES_DIR" ]; then
         dest_file="$USER_AGENTS_DIR/$tmpl_name"
         if [ ! -f "$dest_file" ]; then
             cp "$tmpl" "$dest_file"
-            success "  User agent template: lobster-workspace/.claude/agents/$tmpl_name"
+            success "  User agent template: user/agents/$tmpl_name"
         fi
     done
-    info "  Edit lobster-workspace/.claude/agents/base.agent.md to add your personal context"
+    info "  Edit user/agents/base.agent.md to add your personal context"
 fi
 
 success "Directories created"

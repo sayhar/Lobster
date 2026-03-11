@@ -550,25 +550,23 @@ System agents:
 
 **System agents are read-only at runtime.** They are updated via `git pull` + `install.sh`.
 
-### User Agents (editable, CWD-based)
+### User Agents (editable, git-ignored)
 
-Located in `lobster-workspace/.claude/agents/*.agent.md`. These are gitignored and contain per-user customizations. CC discovers them because CWD = `lobster-workspace/`.
+Located in `user/agents/*.agent.md`. These are gitignored and contain per-user customizations. CLAUDE.md explicitly instructs the LLM to read these files — we do not rely on CC's native `.claude/agents/` discovery for user customization.
 
 - `base.agent.md` — Personality, preferences, and personal context (included in ALL subagents)
 - `orchestrator.agent.md` — Custom dispatch loop instructions
 - Any additional agents you create
 
-Templates for user agents live in `user-templates/agents/` and are copied to `lobster-workspace/.claude/agents/` during install.
+Templates for user agents live in `user-templates/agents/` and are copied to `user/agents/` during install.
 
 ### Session Start Behavior
 
-At the start of each session, read all files matching `lobster-workspace/.claude/agents/*.agent.md` and apply their instructions. The `base.agent.md` file (if it exists) contains your personality and preferences context.
-
-Also read `user/agents/base.agent.md` if it exists for additional personal context.
+At the start of each session, read all files matching `user/agents/*.agent.md` and apply their instructions. The `base.agent.md` file (if it exists) contains your personality and preferences context.
 
 ### Spawning Subagents
 
-When spawning ANY subagent, always include the contents of `lobster-workspace/.claude/agents/base.agent.md` in the prompt if that file exists. This ensures personality and preferences are inherited by all agents.
+When spawning ANY subagent, always include the contents of `user/agents/base.agent.md` in the prompt if that file exists. This ensures personality and preferences are inherited by all agents.
 
 ## Key Directories
 
@@ -580,7 +578,6 @@ When spawning ANY subagent, always include the contents of `lobster-workspace/.c
   - `lobster-workspace/` - Runtime workspace (gitignored, CC CWD)
   - `user/` - User customization (gitignored)
 - `~/lobster/lobster-workspace/` - Runtime workspace (Tier 4, CWD for CC sessions)
-  - `.claude/agents/` - User agent files (CWD-based, discovered by CC)
   - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
@@ -592,7 +589,7 @@ When spawning ANY subagent, always include the contents of `lobster-workspace/.c
   - `logs/` - MCP server logs
 - `~/lobster-workspace/` - Compatibility symlink → `~/lobster/lobster-workspace/`
 - `~/lobster/user/` - User customization (Tier 2, gitignored)
-  - `agents/` - User agent files (read at session start for personal context)
+  - `agents/` - User agent files (read at session start; base.agent.md injected into all subagents)
   - `preferences/` - Structured persistent user preferences
 - `~/lobster-config/` - Secrets (Tier 3, external to repo)
   - `config.env` - API keys, tokens, Telegram credentials
