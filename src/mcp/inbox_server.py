@@ -107,6 +107,7 @@ SENT_DIR = BASE_DIR / "sent"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 BISQUE_OUTBOX_DIR = BASE_DIR / "bisque-outbox"
+LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
 # Reply tracking — records {chat_id_str: timestamp} when send_reply is called.
 # Used by mark_processed to guard against dropping human messages without reply.
@@ -333,7 +334,7 @@ def _check_tmux_ancestry() -> bool:
     try:
         import subprocess
         result = subprocess.run(
-            ["tmux", "-L", "lobster", "list-panes", "-t", "lobster",
+            ["tmux", "-L", LOBSTER_TMUX_SESSION, "list-panes", "-t", LOBSTER_TMUX_SESSION,
              "-F", "#{pane_pid}"],
             capture_output=True, text=True, timeout=5,
         )
@@ -369,12 +370,19 @@ def _is_main_session() -> bool:
     global _main_session_cache
     if _main_session_cache is not None:
         return _main_session_cache
-    _main_session_cache = _check_tmux_ancestry()
-    if _main_session_cache:
+    # Primary: tmux ancestry (unforgeable)
+    if _check_tmux_ancestry():
+        _main_session_cache = True
         log.info("Session guard: confirmed main session via tmux ancestry")
+        return True
+    # Fallback: env var (set by claude-wrapper.exp)
+    result = os.environ.get("LOBSTER_MAIN_SESSION") == "1"
+    _main_session_cache = result
+    if result:
+        log.info("Session guard: confirmed main session via LOBSTER_MAIN_SESSION env var")
     else:
-        log.info("Session guard: NOT main session (tmux ancestry check failed)")
-    return _main_session_cache
+        log.info("Session guard: NOT main session (tmux ancestry check failed, env var not set)")
+    return result
 
 
 def _session_guard_error(tool_name: str) -> list[TextContent]:
