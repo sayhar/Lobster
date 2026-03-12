@@ -1205,7 +1205,7 @@ export VIRTUAL_ENV="$INSTALL_DIR/.venv"
 export PATH="$INSTALL_DIR/.venv/bin:$PATH"
 
 uv pip install --quiet --upgrade pip
-uv pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+uv pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil websockets
 success "Core Python packages installed"
 
 #-------------------------------------------------------------------------------
