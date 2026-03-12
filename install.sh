@@ -658,7 +658,7 @@ if [ "$INSTALL_MODE" = "git" ]; then
     step "Configuring distributed git hooks..."
     cd "$INSTALL_DIR"
     git config --local core.hooksPath .githooks
-    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit 2>/dev/null || true
+    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit .githooks/post-merge .githooks/post-rewrite 2>/dev/null || true
     success "Git hooks configured (core.hooksPath -> .githooks)"
 
 else
