@@ -51,7 +51,9 @@ WHISPER_MODEL_PATH = _WORKSPACE / "whisper.cpp" / "models" / "ggml-small.bin"
 # ---------------------------------------------------------------------------
 MAX_RETRIES = 3
 BASE_RETRY_DELAY_S = 5       # first retry after 5 s, doubles each time
-TRANSCRIPTION_TIMEOUT_S = 300  # 5 min hard cap per file (covers long brain dumps)
+TRANSCRIPTION_TIMEOUT_S = 300  # default 5 min; overridden dynamically by audio duration
+MIN_TIMEOUT_S = 120            # floor for short messages (startup overhead dominates)
+TIMEOUT_MULTIPLIER = 6         # timeout = max(MIN_TIMEOUT_S, duration * this)
 BRAIN_DUMP_THRESHOLD_S = 120   # audio_duration ≥ this → is_brain_dump: true
 POLL_INTERVAL_S = 2            # fallback polling period if watchdog misses an event
 WORKER_LOOP_INTERVAL_S = 0.25  # main asyncio loop tick
@@ -73,6 +75,31 @@ log = logging.getLogger("transcription-worker")
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def get_audio_duration(audio_path: Path) -> float:
+    """Get audio duration in seconds using ffprobe. Returns 0 on failure."""
+    ffprobe = "ffprobe"
+    if FFMPEG_PATH.exists():
+        ffprobe = str(FFMPEG_PATH.parent / "ffprobe")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffprobe, "-v", "quiet", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        return float(stdout.decode().strip())
+    except Exception:
+        return 0
+
+
+def compute_timeout(audio_duration: float) -> int:
+    """Compute transcription timeout scaled to audio length."""
+    if audio_duration > 0:
+        return max(MIN_TIMEOUT_S, int(audio_duration * TIMEOUT_MULTIPLIER))
+    return TRANSCRIPTION_TIMEOUT_S
+
+
 def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
     """Atomically write JSON to path (temp-then-rename, same semantics as bot)."""
     content = json.dumps(data, indent=indent)
@@ -91,7 +118,7 @@ def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
         raise
 
 
-async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path) -> bool:
+async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path, timeout_s: int = TRANSCRIPTION_TIMEOUT_S) -> bool:
     """Convert OGG/OPUS audio to 16 kHz mono WAV for whisper.cpp.
 
     Writes to a temp file first and renames atomically so a partial or failed
@@ -121,7 +148,7 @@ async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path) -> bool:
         )
         _, stderr = await asyncio.wait_for(
             proc.communicate(),
-            timeout=TRANSCRIPTION_TIMEOUT_S,
+            timeout=timeout_s,
         )
     except asyncio.TimeoutError:
         if proc is not None:
@@ -133,7 +160,7 @@ async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path) -> bool:
                 await proc.wait()
             except Exception:
                 pass
-        log.warning(f"ffmpeg conversion timed out after {TRANSCRIPTION_TIMEOUT_S}s")
+        log.warning(f"ffmpeg conversion timed out after {timeout_s}s")
         tmp_wav_path.unlink(missing_ok=True)
         return False
     except Exception as e:
@@ -151,7 +178,7 @@ async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path) -> bool:
     return True
 
 
-async def run_whisper_cpp(audio_path: Path) -> tuple[bool, str]:
+async def run_whisper_cpp(audio_path: Path, timeout_s: int = TRANSCRIPTION_TIMEOUT_S) -> tuple[bool, str]:
     """Run whisper.cpp CLI. Returns (success, transcription_or_error)."""
     if not WHISPER_CPP_PATH.exists():
         return False, f"whisper.cpp binary not found at {WHISPER_CPP_PATH}"
@@ -171,7 +198,7 @@ async def run_whisper_cpp(audio_path: Path) -> tuple[bool, str]:
     try:
         # Use a single deadline for both spawn and communicate so the effective
         # wall-clock limit is exactly TRANSCRIPTION_TIMEOUT_S, not 2x.
-        async with asyncio.timeout(TRANSCRIPTION_TIMEOUT_S):
+        async with asyncio.timeout(timeout_s):
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -189,7 +216,7 @@ async def run_whisper_cpp(audio_path: Path) -> tuple[bool, str]:
                 await proc.wait()
             except Exception:
                 pass
-        return False, f"whisper.cpp timed out after {TRANSCRIPTION_TIMEOUT_S}s"
+        return False, f"whisper.cpp timed out after {timeout_s}s"
 
     if proc.returncode != 0:
         error_msg = stderr.decode().strip() if stderr else "unknown error"
@@ -251,9 +278,15 @@ async def transcribe_pending_file(pending_file: Path) -> None:
         )
         return
 
-    # Determine if this is a brain dump up front (duration is known at arrival time)
+    # Get audio duration — prefer metadata from bot, fall back to ffprobe
     audio_duration = msg_data.get("audio_duration", 0)
+    if not audio_duration:
+        audio_duration = await get_audio_duration(audio_path)
     is_brain_dump = audio_duration >= BRAIN_DUMP_THRESHOLD_S
+
+    # Compute timeout scaled to audio length
+    timeout_s = compute_timeout(audio_duration)
+    log.info(f"  Audio duration: {audio_duration:.0f}s → timeout: {timeout_s}s")
 
     # OGG → WAV conversion (once; reuse on retries).
     # convert_ogg_to_wav writes atomically (temp-then-rename), so any existing
@@ -262,7 +295,7 @@ async def transcribe_pending_file(pending_file: Path) -> None:
     if audio_path.suffix.lower() in (".ogg", ".oga", ".opus"):
         wav_path = audio_path.with_suffix(".wav")
         if not wav_path.exists():
-            ok = await convert_ogg_to_wav(audio_path, wav_path)
+            ok = await convert_ogg_to_wav(audio_path, wav_path, timeout_s=timeout_s)
             if not ok:
                 # ffmpeg failure is generally permanent (bad file or binary missing)
                 move_to_dead_letter(
@@ -277,7 +310,7 @@ async def transcribe_pending_file(pending_file: Path) -> None:
     try:
         for attempt in range(1, MAX_RETRIES + 1):
             log.info(f"  whisper attempt {attempt}/{MAX_RETRIES} for {pending_file.name}")
-            success, result = await run_whisper_cpp(transcribe_path)
+            success, result = await run_whisper_cpp(transcribe_path, timeout_s=timeout_s)
 
             if success and result:
                 # --- SUCCESS ---
